@@ -74,6 +74,20 @@ On the first real 3-segment session a whole 60 s segment vanished — 57.7 s of 
    already inside the NEXT segment, that recovery seeks to the END of it.
    That is the line that actually ate the 57.7 s.
 
+Two more it showed, away from the boundary:
+
+- **A seek holds the outgoing picture STILL**, not merely on screen. The
+  outgoing player used to keep playing for the seconds a cross-segment
+  download takes — six of them, on one measured seek — while the transport bar
+  already read the seek target, so the picture and the clock were describing
+  different moments. A boundary lead-in is deliberately exempt: there the
+  outgoing segment is still the right one, right up to its last frame.
+- **A torn-down lane dies quietly.** The players belong to the hook, and one
+  that has been released throws `NotFoundException` on every access; the hook
+  now destroys engines before releasing players rather than trusting React's
+  cleanup order, and an engine handed a dead pair goes inert instead of
+  throwing into the tree.
+
 ## 0.1.0
 
 First release: live telemetry and live video on React Native, over
