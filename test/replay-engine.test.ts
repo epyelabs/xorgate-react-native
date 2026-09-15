@@ -322,6 +322,27 @@ describe("ExpoVideoReplayEngine", () => {
     expect(h.front().playing).toBe(true);
   });
 
+  it("holds the outgoing picture still while a seek downloads", async () => {
+    const h = harness();
+    await startPlaying(h);
+    const showing = h.front();
+    showing.emitTime(10);
+    expect(showing.playing).toBe(true);
+
+    h.engine.seek(130); // segment 2, which nothing holds
+    await Promise.resolve();
+
+    // The clock is already pinned at the seek target, so a picture that kept
+    // advancing would be showing a different moment from the one the
+    // transport says it is. The device ran six seconds of the previous
+    // segment on after a seek before this.
+    expect(showing.playing).toBe(false);
+    expect(h.engine.position).toBeCloseTo(130, 3);
+
+    h.hidden().becomeReady(25);
+    expect(h.front().playing).toBe(true);
+  });
+
   it("seeks inside the active segment without loading anything", async () => {
     const h = harness();
     await startPlaying(h);

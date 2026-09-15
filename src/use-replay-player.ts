@@ -137,6 +137,10 @@ export function useReplayPlayer(
     const players = pool.current;
     const lanEngines = engines.current;
     return () => {
+      // Engines first, players second, and explicitly rather than by trusting
+      // React's cleanup order: a `release()`d player throws on every access,
+      // so an engine torn down after its pair would throw into the tree.
+      for (const engine of lanEngines.values()) engine.destroy();
       for (const pair of players.values()) {
         for (const player of pair) player.release();
       }

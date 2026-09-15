@@ -22,9 +22,9 @@ const BOUNDARY_LEAD_S = 0.5;
  * How close to a segment's end counts as having reached it. It must exceed
  * one `timeUpdate` interval: the last event before a file runs out lands
  * wherever the 50 ms cadence happens to put it, and a stricter test simply
- * never fires. The cost of releasing this early is at most one frame at the
- * recorder's 15 fps; the cost of never releasing is a stalled lane, which the
- * device showed is very much worse (see BOUNDARY_WAIT_MAX_MS).
+ * never fires. Kept under one frame at the recorder's 15 fps, because
+ * releasing early skips that much video; the boundary timer below is what
+ * covers the rest, and it errs the other way.
  */
 const BOUNDARY_EPSILON_S = 0.03;
 /**
@@ -201,17 +201,28 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
     this.onAuthError = opts.onAuthError;
     this.onActivePlayerChange = opts.onActivePlayerChange;
     this.onDebug = opts.onDebug;
-    this.slots = [this.makeSlot(opts.players[0], 0), this.makeSlot(opts.players[1], 1)];
+    this.slots = [
+      this.makeSlot(opts.players[0], 0),
+      this.makeSlot(opts.players[1], 1),
+    ];
   }
 
   private makeSlot(player: VideoPlayer, idx: 0 | 1): Slot {
-    // Recorded segments are video-only; muting keeps the player away from the
-    // audio session entirely, so a replay never ducks anything.
-    player.muted = true;
-    player.loop = false;
-    // 50 ms: the resolution the boundary check and the seam measurement rest
-    // on, and under one frame at the recorder's 15 fps.
-    player.timeUpdateEventInterval = 0.05;
+    try {
+      // Recorded segments are video-only; muting keeps the player away from
+      // the audio session entirely, so a replay never ducks anything.
+      player.muted = true;
+      player.loop = false;
+      // 50 ms: the resolution the boundary check and the seam measurement
+      // rest on, and under one frame at the recorder's 15 fps.
+      player.timeUpdateEventInterval = 0.05;
+    } catch {
+      // The players belong to the hook. One that has already been released
+      // throws `NotFoundException` on every access, so an engine handed a
+      // dead pair goes inert instead of throwing into the React tree — which
+      // is what a torn-down lane looked like on the device.
+      this.destroyed = true;
+    }
     const slot: Slot = {
       player,
       seg: null,
@@ -287,7 +298,11 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
       // Clamped to the MANIFEST duration: a file's tail past the next
       // segment's start is media this lane must never play.
       const end =
-        start + Math.min(slot.player.bufferedPosition, slot.seg.effectiveDurationMs / 1000);
+        start +
+        Math.min(
+          slot.player.bufferedPosition,
+          slot.seg.effectiveDurationMs / 1000,
+        );
       if (end > start) out.push({ start, end });
     }
     return out.sort((a, b) => a.start - b.start);
@@ -303,7 +318,9 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
     // safe to read — it can answer for the previous item until then.
     const slot = this.slotHolding(hit.segment);
     if (!slot || !slot.ready) return false;
-    return (ts - hit.segment.startTs) / 1000 <= slot.player.bufferedPosition + 0.1;
+    return (
+      (ts - hit.segment.startTs) / 1000 <= slot.player.bufferedPosition + 0.1
+    );
   }
 
   isStalled(): boolean {
@@ -340,7 +357,8 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
       // A seek is due at once, even if this activation started as a boundary
       // lead-in that was still waiting for the outgoing segment.
       pending.released = true;
-      if (pending.prepared) this.slots[pending.idx].player.currentTime = offsetSec;
+      if (pending.prepared)
+        this.slots[pending.idx].player.currentTime = offsetSec;
       this.maybePromote();
       return;
     }
@@ -360,7 +378,8 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
     this.applyTransport();
     // A lead-in prepared while paused has no timer: arm it now that the
     // outgoing segment is running towards its end again.
-    if (this.activation?.prepared && !this.activation.released) this.armBoundaryTimer();
+    if (this.activation?.prepared && !this.activation.released)
+      this.armBoundaryTimer();
   }
 
   pause(): void {
@@ -392,7 +411,12 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
       if (!slot.ready && !slot.loading) this.load(pending.idx, pending.seg);
       // A prepared lead-in with no timer running (the app was backgrounded
       // and the timer was starved, say) still has to cross its boundary.
-      if (this.wantPlay && pending.prepared && !pending.released && this.boundaryTimer === null) {
+      if (
+        this.wantPlay &&
+        pending.prepared &&
+        !pending.released &&
+        this.boundaryTimer === null
+      ) {
         this.armBoundaryTimer();
       }
     }
@@ -402,11 +426,18 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
     if (hit) {
       const active = this.slots[this.activeIdx];
       const pendingSeg = this.activation?.seg ?? null;
-      if (!sameSeg(active.seg, hit.segment) && !sameSeg(pendingSeg, hit.segment)) {
+      if (
+        !sameSeg(active.seg, hit.segment) &&
+        !sameSeg(pendingSeg, hit.segment)
+      ) {
         this.activate(hit.segment, (ts - hit.segment.startTs) / 1000, false);
         return;
       }
-      if (sameSeg(active.seg, hit.segment) && !active.ready && !active.loading) {
+      if (
+        sameSeg(active.seg, hit.segment) &&
+        !active.ready &&
+        !active.loading
+      ) {
         // The visible slot's own load failed. Retry it through the backoff;
         // there is no picture to protect here.
         this.load(this.activeIdx, hit.segment);
@@ -484,15 +515,27 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
    */
   private applyTransport(): void {
     if (this.destroyed) return;
+    // A seek whose media is still downloading: hold the outgoing picture on
+    // its last frame rather than let it run on. The clock is already pinned
+    // at the seek target, so a picture that keeps advancing is showing a
+    // different moment from the one the transport bar says it is — measured
+    // on the device as six seconds of the previous segment playing on after a
+    // seek. A boundary lead-in is NOT this: there the outgoing segment is
+    // still the right one, right up to its last frame.
+    const seeking =
+      this.activation !== null &&
+      this.activation.released &&
+      !this.activation.prepared;
     for (let i = 0; i < 2; i++) {
       const idx = i as 0 | 1;
       const slot = this.slots[idx];
-      if (idx === this.activeIdx && this.wantPlay && slot.ready) {
+      if (idx === this.activeIdx && this.wantPlay && slot.ready && !seeking) {
         // The rate goes on the player that is about to play, and on no other:
         // on iOS a rate IS the transport, so setting it on a parked preload
         // can start it — which is how a preloaded segment reached 15.68 s
         // before it was ever shown.
-        if (slot.player.playbackRate !== this.rate) slot.player.playbackRate = this.rate;
+        if (slot.player.playbackRate !== this.rate)
+          slot.player.playbackRate = this.rate;
         slot.player.play();
       } else {
         slot.player.pause();
@@ -504,14 +547,24 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
    * Bring `seg` to the front at `offsetSec`, always through the HIDDEN player
    * so the picture on screen survives the load.
    */
-  private activate(seg: ReplaySegment, offsetSec: number, seamless: boolean): void {
+  private activate(
+    seg: ReplaySegment,
+    offsetSec: number,
+    seamless: boolean,
+  ): void {
     if (this.destroyed) return;
     const crossed = this.crossed;
-    if (crossed && sameSeg(crossed.seg, seg) && Date.now() - crossed.at < BOUNDARY_GRACE_MS) {
+    if (
+      crossed &&
+      sameSeg(crossed.seg, seg) &&
+      Date.now() - crossed.at < BOUNDARY_GRACE_MS
+    ) {
       // The clock is still a few milliseconds behind the boundary this lane
       // has already crossed. Going back would undo the swap, and then the
       // next tick would redo it.
-      this.debug(`ignored a move back into seq ${seg.seq}: the clock has not caught up`);
+      this.debug(
+        `ignored a move back into seq ${seg.seq}: the clock has not caught up`,
+      );
       return;
     }
     const idx = (1 - this.activeIdx) as 0 | 1;
@@ -526,7 +579,10 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
       // else (a seek, a gap exit, the first segment of all) is due now.
       released: !seamless,
     };
-    this.debug(`activate seq ${seg.seq} +${offsetSec.toFixed(2)}s seamless=${seamless} · ${this.snapshot()}`);
+    this.debug(
+      `activate seq ${seg.seq} +${offsetSec.toFixed(2)}s seamless=${seamless} · ${this.snapshot()}`,
+    );
+    this.applyTransport();
     if (sameSeg(incoming.seg, seg) && incoming.ready) {
       this.prepare();
       return;
@@ -558,7 +614,9 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
     }
     pending.prepared = true;
     pending.preparedAt = Date.now();
-    this.debug(`prepared seq ${pending.seg.seq} on ${pending.idx === 0 ? "A" : "B"}`);
+    this.debug(
+      `prepared seq ${pending.seg.seq} on ${pending.idx === 0 ? "A" : "B"}`,
+    );
     this.armBoundaryTimer();
     this.maybePromote();
   }
@@ -569,7 +627,9 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
     if (!pending || !pending.prepared || !pending.released) return;
     this.activation = null;
     this.clearBoundaryTimer();
-    this.debug(`promote seq ${pending.seg.seq} to ${pending.idx === 0 ? "A" : "B"} at +${pending.offsetSec.toFixed(2)}s`);
+    this.debug(
+      `promote seq ${pending.seg.seq} to ${pending.idx === 0 ? "A" : "B"} at +${pending.offsetSec.toFixed(2)}s`,
+    );
     const retiredIdx = this.activeIdx;
     const retiredSeg = this.slots[retiredIdx].seg;
     this.activeIdx = pending.idx;
@@ -606,7 +666,8 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
     if (!this.wantPlay || this.destroyed) return;
     const slot = this.slots[this.activeIdx];
     if (!slot.seg) return;
-    const remainMs = ((this.endOf(slot) - slot.player.currentTime) * 1000) / (this.rate || 1);
+    const remainMs =
+      ((this.endOf(slot) - slot.player.currentTime) * 1000) / (this.rate || 1);
     this.boundaryTimer = setTimeout(
       () => this.onBoundaryTimer(),
       Math.max(0, remainMs) + BOUNDARY_TIMER_GRACE_MS,
@@ -620,7 +681,8 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
     if (!pending || pending.released || !pending.prepared) return;
     const slot = this.slots[this.activeIdx];
     if (!slot.seg) return;
-    const remainMs = ((this.endOf(slot) - slot.player.currentTime) * 1000) / (this.rate || 1);
+    const remainMs =
+      ((this.endOf(slot) - slot.player.currentTime) * 1000) / (this.rate || 1);
     if (remainMs > BOUNDARY_TIMER_GRACE_MS) {
       this.armBoundaryTimer();
       return;
@@ -709,7 +771,9 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
     if (!slot.seg || slot.ready) return;
     slot.ready = true;
     slot.loading = false;
-    this.debug(`ready seq ${slot.seg.seq} on ${idx === 0 ? "A" : "B"} (buffered ${slot.player.bufferedPosition.toFixed(1)}s, duration ${slot.player.duration.toFixed(2)}s)`);
+    this.debug(
+      `ready seq ${slot.seg.seq} on ${idx === 0 ? "A" : "B"} (buffered ${slot.player.bufferedPosition.toFixed(1)}s, duration ${slot.player.duration.toFixed(2)}s)`,
+    );
     this.failedAt.delete(slot.seg.startTs);
     // Always, not only for the visible slot: a freshly loaded preload must be
     // held still, and the rate belongs to whatever is about to play.
@@ -746,7 +810,8 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
       // The outgoing segment has played out: release the lead-in. THIS is the
       // moment that keeps the playhead continuous across the seam — releasing
       // at the lead instead would silently drop half a second per boundary.
-      if (remainS <= BOUNDARY_EPSILON_S) this.releaseBoundary("reached the boundary");
+      if (remainS <= BOUNDARY_EPSILON_S)
+        this.releaseBoundary("reached the boundary");
       return;
     }
     if (remainS > BOUNDARY_LEAD_S) return;
@@ -772,7 +837,9 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
     if (!slot.seg) return;
     const next = this.contiguousNext(slot.seg);
     if (!next) return;
-    this.debug(`release (${reason}) seq ${slot.seg.seq} → ${next.seq} · ${this.snapshot()}`);
+    this.debug(
+      `release (${reason}) seq ${slot.seg.seq} → ${next.seq} · ${this.snapshot()}`,
+    );
     const pending = this.activation;
     if (pending) {
       if (!sameSeg(pending.seg, next) || pending.released) return;
@@ -803,7 +870,11 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
     return Math.abs(next.startTs - end) <= CONTIGUOUS_MS ? next : null;
   }
 
-  private onStatusChange(idx: 0 | 1, status: VideoPlayerStatus, message: string | null): void {
+  private onStatusChange(
+    idx: 0 | 1,
+    status: VideoPlayerStatus,
+    message: string | null,
+  ): void {
     if (this.destroyed) return;
     const slot = this.slots[idx];
     if (status === "readyToPlay") {
@@ -814,10 +885,19 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
     if (status === "error") {
       slot.ready = false;
       slot.loading = false;
-      if (slot.seg) this.onLoadFailure(slot.seg, message === null ? null : new Error(message));
+      if (slot.seg)
+        this.onLoadFailure(
+          slot.seg,
+          message === null ? null : new Error(message),
+        );
       return;
     }
-    if (status === "loading" && idx === this.activeIdx && slot.ready && this.wantPlay) {
+    if (
+      status === "loading" &&
+      idx === this.activeIdx &&
+      slot.ready &&
+      this.wantPlay
+    ) {
       // A buffer underrun on the player that is on screen. The core's stall
       // recovery reads `buffered()` and decides whether to jump or wait.
       for (const cb of this.waitingCbs) cb();
@@ -848,7 +928,9 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
         if (this.destroyed) return;
         if (res.status === 403) this.onAuthError?.();
         else if (res.status === 404 || res.status === 410) {
-          this.onError(`Recorded video segment ${seg.seq} is no longer available.`);
+          this.onError(
+            `Recorded video segment ${seg.seq} is no longer available.`,
+          );
         }
       } catch {
         /* offline or aborted: `ensureAt` retries after the backoff window */
