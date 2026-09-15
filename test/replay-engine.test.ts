@@ -196,15 +196,26 @@ describe("ExpoVideoReplayEngine", () => {
     // What the real seq-0 segment does: 60.000 s claimed, 59.987 s of file.
     showing.duration = 59.987;
 
-    showing.emitTime(59.6); // lead-in prepared
-    expect(next.playing).toBe(false);
+    vi.useFakeTimers();
+    try {
+      showing.emitTime(59.6); // lead-in prepared, boundary timer armed
+      expect(next.playing).toBe(false);
 
-    // The 50 ms cadence never lands on 59.987, and this file emits no
-    // `playToEnd` — the two ways a strict boundary test silently never fires.
-    showing.emitTime(59.95);
+      // The 50 ms cadence never lands on 59.987, and this file emits no
+      // `playToEnd` — the two ways a strict boundary test silently never
+      // fires, and between them what froze a whole segment on the device.
+      showing.emitTime(59.95);
+      expect(h.engine.activeIndex).toBe(showing === h.players[0] ? 0 : 1);
+
+      vi.advanceTimersByTime(600);
+    } finally {
+      vi.useRealTimers();
+    }
 
     expect(h.engine.activeIndex).toBe(next === h.players[0] ? 0 : 1);
     expect(next.playing).toBe(true);
+    // The timer fires AFTER the end, so the swap holds a frame rather than
+    // skipping video: the playhead lands on the manifest boundary exactly.
     expect(h.engine.position).toBeCloseTo(60, 2);
   });
 
@@ -243,24 +254,27 @@ describe("ExpoVideoReplayEngine", () => {
     expect(h.engine.isStalled()).toBe(false);
   });
 
-  it("releases a prepared lead-in from the pump if nothing else did", async () => {
+  it("releases a lane that has frozen near the end of its segment", async () => {
     const h = harness();
     await startPlaying(h);
     const showing = h.front();
     const next = h.hidden();
-    showing.emitTime(59.6);
-    expect(h.engine.activeIndex).toBe(showing === h.players[0] ? 0 : 1);
 
-    // Nothing at all arrives: no time update, no stop, no end. The watchdog
-    // is the only thing between that and a lane frozen forever, because a
-    // player that is out of content still reports itself `readyToPlay`.
     vi.useFakeTimers();
     try {
-      vi.setSystemTime(Date.now() + 500);
-      h.engine.ensureAt(FROM + 59_700);
+      showing.emitTime(59.6);
+      // Nothing more arrives at all: no time update, no stop, no end, and the
+      // boundary timer keeps deferring because the player has not reached its
+      // own end either. A lane frozen like this is invisible to the player
+      // core — the media still reports itself `readyToPlay`, because it is:
+      // it is simply out of content — so the pump is what has to notice.
+      h.engine.ensureAt(FROM + 59_600);
+      vi.advanceTimersByTime(800);
+      h.engine.ensureAt(FROM + 59_600);
     } finally {
       vi.useRealTimers();
     }
+
     expect(h.engine.activeIndex).toBe(next === h.players[0] ? 0 : 1);
   });
 
@@ -430,13 +444,17 @@ describe("ExpoVideoReplayEngine", () => {
     expect(firstFrame).toHaveBeenCalledTimes(1);
   });
 
-  it("applies the rate to both players and pauses only what is on screen", async () => {
+  it("puts the rate only on the player that is about to play", async () => {
     const h = harness();
     await startPlaying(h);
 
     h.engine.setRate(2);
-    expect(h.players[0].playbackRate).toBe(2);
-    expect(h.players[1].playbackRate).toBe(2);
+    expect(h.front().playbackRate).toBe(2);
+    // On iOS a rate IS the transport, so setting one on a parked preload can
+    // start it playing. The device found a preloaded segment 15.68 s in
+    // before it had ever been shown.
+    expect(h.hidden().playbackRate).toBe(1);
+    expect(h.hidden().playing).toBe(false);
 
     h.engine.pause();
     expect(h.engine.paused).toBe(true);
@@ -445,8 +463,44 @@ describe("ExpoVideoReplayEngine", () => {
 
     h.engine.play();
     expect(h.front().playing).toBe(true);
-    // The preload slot never plays: it is holding the next segment's frame 0.
     expect(h.hidden().playing).toBe(false);
+  });
+
+  it("parks the incoming player on the frame it will be shown at", async () => {
+    const h = harness();
+    await startPlaying(h);
+    const showing = h.front();
+    const next = h.hidden();
+    // A preload that drifted off zero — which is what the device found, and
+    // promoting it would start segment 1 sixteen seconds in.
+    next.currentTime = 15.68;
+
+    showing.emitTime(59.6);
+    expect(next.currentTime).toBeCloseTo(0, 3);
+  });
+
+  it("refuses to be dragged back into the segment it has just left", async () => {
+    const h = harness();
+    await startPlaying(h);
+    const showing = h.front();
+    const next = h.hidden();
+    showing.emitTime(59.6);
+    showing.emitTime(60.0);
+    expect(h.engine.activeIndex).toBe(next === h.players[0] ? 0 : 1);
+    const loadsBefore = showing.loads.length;
+
+    // Promoting does not move the playhead: the clock is paced by this lane
+    // and only learns the new position on its next tick, so the very next
+    // `ensureAt` arrives a few milliseconds BEFORE the boundary. Acting on it
+    // swaps back, and then the next tick swaps forward again — the ping-pong
+    // that cost the device a whole segment.
+    h.engine.ensureAt(FROM + 59_910);
+    await Promise.resolve();
+    h.engine.seek(59.91);
+    await Promise.resolve();
+
+    expect(h.engine.activeIndex).toBe(next === h.players[0] ? 0 : 1);
+    expect(showing.loads.length).toBe(loadsBefore);
   });
 
   it("detaches every listener and drops both sources on destroy", async () => {
