@@ -8,16 +8,24 @@
  * ```
  *
  * Hermes on Expo SDK 57 has NO `crypto` global — measured, not assumed: not
- * `randomUUID`, not `getRandomValues`, not `subtle`. `nativePlatform()` covers
- * the SDK's own need (client ids) through the `randomId` slot, so this import
- * is not what makes telemetry or video work. It is here for the layer
- * underneath: the AWS SDK and its signers reach for `crypto.getRandomValues`
- * on some paths, and so does almost any library that generates an id.
+ * `randomUUID`, not `getRandomValues`, not `subtle`.
  *
- * It is an additive polyfill — an existing `crypto` keeps every function it
- * already has — and it is a separate entry point so the main entry never
- * pulls expo-crypto. A bare React Native app without expo-crypto installed
- * uses `react-native-get-random-values` and passes `randomId` instead.
+ * **Live video does not work without this import**, though not because of
+ * this package: `nativePlatform()` covers the SDK's own client ids through
+ * the `randomId` slot, and live telemetry runs with no polyfill at all. It is
+ * the AWS SDK underneath the KVS viewer. `@smithy/core`'s React Native serde
+ * bundle ends its UUID v4 path in `(array) => crypto.getRandomValues(array)`
+ * with a BARE `crypto`, and that is the fallback `bindV4` selects precisely
+ * when `typeof crypto === "undefined"` — so the guard hands control to the
+ * one line that cannot survive the case it guards for (the same bug was fixed
+ * for the Node build in smithy-typescript#2022; the native build was not —
+ * smithy-typescript#2276). `createNativeWebRtcPlatform` checks for the global
+ * at its first AWS call so the message names this import rather than leaving
+ * a `ReferenceError` to be retried forever.
+ *
+ * It is additive — an existing `crypto` keeps every function it already has —
+ * and it is a separate entry point so the polyfill is a deliberate line in
+ * your entry file rather than a side effect of importing the package.
  *
  * NOTE this is entropy and UUIDs only. `crypto.subtle` is NOT installed: the
  * one place the SDK needs WebCrypto is SigV4 signing inside the KVS signaling
