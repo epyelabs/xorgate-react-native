@@ -1,68 +1,262 @@
 # @xorgate/react-native
 
-React Native adapters for [`@xorgate/react`](https://www.npmjs.com/package/@xorgate/react):
-live telemetry over MQTT-over-WebSocket, live video over WebRTC rendered by
-`react-native-webrtc`'s `RTCView`, and the recorded-media replay player over
-`expo-video`. Everything pure (session hardening, telemetry feed, timeline,
-clock, lanes) stays in `@xorgate/react`; this package supplies the platform
-adapters and the RN-flavoured hooks and components.
+React Native adapters for [`@xorgate/react`](https://www.npmjs.com/package/@xorgate/react).
+Live telemetry over MQTT-over-WebSocket and live video over WebRTC, rendered by
+`react-native-webrtc`'s `RTCView` — a real native video view with hardware
+H.264 decode behind it, not a web player in a shell.
 
-**Status: scaffold.** No runtime code ships yet. The plan is
-`alocate/plans/alocate-mobile-business-layer/XORGATE-REACT-NATIVE.md`; the
-runtime facts the design rests on (Metro shims, which globals Hermes has,
-`getStats()` field names on RN, the replay seam) are in that folder's
-`SPIKES.md`.
+Everything pure or platform-neutral — the KVS session hardening, the telemetry
+feed, the timeline, lanes, the replay clock, the telemetry math, the data hooks
+— lives in `@xorgate/react` and is **re-exported from here**, so your app
+imports from one package. What this package adds is the runtime underneath
+(`nativePlatform`, `XorgateNativeProvider`) and the two things that cannot be
+platform-neutral because they are pixels.
 
-**Full reference (once published): [docs.xorgate.io/docs/frontend-sdk](https://docs.xorgate.io/docs/frontend-sdk)**
+**0.1.0 ships telemetry and live video.** Replay over `expo-video` is 0.2.0.
 
-## Install (target shape, from 0.1.0)
+**Full reference: [docs.xorgate.io/docs/frontend-sdk](https://docs.xorgate.io/docs/frontend-sdk)**
+
+## Install
 
 ```bash
-npx expo install @xorgate/react-native @xorgate/react react-native-webrtc @config-plugins/react-native-webrtc
+npx expo install @xorgate/react-native react-native-webrtc @config-plugins/react-native-webrtc expo-crypto
 ```
 
-Peers: `react`, `react-native`, `react-native-webrtc` (live video),
-`expo-video` (replay, from 0.2.0). A development build is required
-(`react-native-webrtc` is a native module; Expo Go cannot run it).
+Peers: `react`, `react-native`, `react-native-webrtc`; `expo-crypto` is
+optional and only used by the `/polyfills` entry. `@xorgate/react` is a
+dependency, not a peer — one resolved copy is what makes `instanceof
+XorgateError` hold across the boundary.
+
+Add the config plugin to `app.json` / `app.config.ts`:
+
+```json
+{ "plugins": ["@config-plugins/react-native-webrtc"] }
+```
+
+**A development build is required.** `react-native-webrtc` is a native module,
+so Expo Go cannot run it.
+
+The plugin writes both an `NSCameraUsageDescription` and an
+`NSMicrophoneUsageDescription`, and on Android adds `CAMERA`, `RECORD_AUDIO`,
+`MODIFY_AUDIO_SETTINGS` and Bluetooth permissions. A **viewer** app uses none
+of them, but Apple's upload check (ITMS-90683) still wants a microphone string
+from any binary that links the microphone APIs, which WebRTC does. Set an
+honest one rather than shipping the plugin's placeholder, and strip the Android
+permissions you do not use:
+
+```ts
+plugins: [["@config-plugins/react-native-webrtc", {
+  cameraPermission: "…",
+  microphonePermission: "This app views live video only and does not record audio.",
+}]],
+android: { blockedPermissions: ["android.permission.RECORD_AUDIO", "android.permission.MODIFY_AUDIO_SETTINGS"] },
+```
 
 ## Metro setup
 
-`@xorgate/react` and its AWS / KVS / mqtt tree bundle under Metro with three
-resolver rules in `metro.config.js`; the package will document (and, where it
-can, ship) them:
+`@xorgate/react`'s AWS / KVS / mqtt tree bundles under Metro with three
+resolver rules. They are mechanical and package-agnostic — they read each
+package's own `package.json` — so paste this into `metro.config.js` once:
 
-1. `@aws-sdk/*` and `@smithy/*` packages that ship **no `exports` map** must
-   resolve to their `dist-es` build (`module` entry). Their `react-native` /
-   `browser` fields are sub-path maps, not entry points, so Metro otherwise
-   falls through to `main` = `dist-cjs`, which requires `node:https` /
-   `node:stream`. Packages **with** an `exports` map (`@smithy/core`,
-   `@aws-sdk/core`, `@aws-sdk/nested-clients`) must be left alone.
-2. `./runtimeConfig` requested from inside a `dist-es` directory resolves to
-   the `runtimeConfig.native.js` sibling.
-3. `ws` resolves to `ws/browser.js`: the KVS signaling client does
-   `new (WebSocket || require("ws"))(url)`, and React Native has a global
-   `WebSocket`, so the Node implementation only has to be *resolvable*.
+```js
+const fs = require("node:fs")
+const path = require("node:path")
+const { getDefaultConfig } = require("expo/metro-config")
 
-4. `isomorphic-webcrypto` (a dependency of the KVS signaling client) aliases to
-   a small WebCrypto subset — `subtle.digest` SHA-256, `importKey` raw/HMAC,
-   `sign` HMAC — over `@aws-crypto/sha256-js`; its own React Native build
-   evaluates to `undefined` on Hermes.
-5. A `crypto` global: Hermes / Expo SDK 57 has none, and the SDK draws client
-   ids from `crypto.randomUUID()`. One line from `expo-crypto`
-   (`getRandomValues`, `randomUUID`), imported before the SDK.
+const config = getDefaultConfig(__dirname)
+
+const AWS_SCOPES = ["@aws-sdk/", "@smithy/"]
+const esEntry = new Map()
+
+/**
+ * (1) `@aws-sdk/*` and `@smithy/*` packages that ship NO `exports` map fall
+ * through to `main` = `dist-cjs`, which requires `node:https` / `node:stream`.
+ * Their `react-native` and `browser` fields are sub-path maps, not entry
+ * points, so Metro cannot use them: redirect the bare request to the `module`
+ * entry (`dist-es`). Packages that DO have `exports` (`@smithy/core`,
+ * `@aws-sdk/core`, `@aws-sdk/nested-clients`) resolve correctly and must be
+ * left alone — `@smithy/core` actively refuses `./dist-es/index.js`.
+ */
+function awsEsEntry(name) {
+  if (!AWS_SCOPES.some((s) => name.startsWith(s))) return null
+  if (name.split("/").length !== 2) return null // sub-path imports are fine
+  if (esEntry.has(name)) return esEntry.get(name)
+  let result = null
+  try {
+    const dir = path.dirname(require.resolve(`${name}/package.json`, { paths: [__dirname] }))
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"))
+    if (!pkg.exports && typeof pkg.module === "string") result = path.join(dir, pkg.module)
+  } catch {
+    result = null
+  }
+  esEntry.set(name, result)
+  return result
+}
+
+const previous = config.resolver.resolveRequest
+
+config.resolver.resolveRequest = (context, moduleName, platform) => {
+  const es = awsEsEntry(moduleName)
+  if (es) return { type: "sourceFile", filePath: es }
+
+  // (2) `./runtimeConfig` from inside a `dist-es` directory -> the
+  // `runtimeConfig.native.js` sibling, which is what the package's
+  // `react-native` sub-path map would have chosen. Without it the AWS clients
+  // come up with the Node runtime config instead of `FetchHttpHandler`.
+  if (moduleName === "./runtimeConfig" && context.originModulePath.includes(`${path.sep}dist-es${path.sep}`)) {
+    const native = path.join(path.dirname(context.originModulePath), "runtimeConfig.native.js")
+    if (fs.existsSync(native)) return { type: "sourceFile", filePath: native }
+  }
+
+  // (3) The KVS signaling client does `new (WebSocket || require("ws"))(url)`.
+  // React Native has a global `WebSocket`, so the Node implementation only has
+  // to RESOLVE; it never runs.
+  if (moduleName === "ws") {
+    return { type: "sourceFile", filePath: require.resolve("ws/browser.js", { paths: [__dirname] }) }
+  }
+
+  return (previous ?? context.resolveRequest)(context, moduleName, platform)
+}
+
+module.exports = config
+```
 
 Nothing else was needed on Expo SDK 57 / Hermes: no `buffer`, `process`,
-`events`, `url`, stream or URL polyfill (spike 1, 2026-09-15).
+`events`, `url`, stream or URL polyfill, measured rather than assumed.
 
-A global `resolverMainFields: ["module", …]` is **not** a shortcut: it breaks
-`react-native-safe-area-context`'s codegen spec.
+A global `resolverMainFields: ["module", …]` is **not** a shortcut for rule 1:
+it breaks `react-native-safe-area-context`'s codegen spec.
+
+## Polyfill
+
+Hermes ships no `crypto` global at all — not `randomUUID`, not
+`getRandomValues`, not `subtle`. Add one line at the very top of your entry
+file, before anything that reaches the SDK:
+
+```ts
+import "@xorgate/react-native/polyfills"
+```
+
+It installs `getRandomValues` and `randomUUID` from `expo-crypto`, additively
+(an existing `crypto` keeps everything it already has). Without `expo-crypto`,
+skip the import and pass your own `randomId` to the provider instead.
+
+## Use
+
+```tsx
+import { XorgateNativeProvider } from "@xorgate/react-native"
+
+<XorgateNativeProvider
+  key={organizationId ?? "none"}          // remounting is how you switch tenants
+  auth={{ getLiveCredentials }}
+  organizationId={organizationId}
+>
+  {children}
+</XorgateNativeProvider>
+```
+
+Same props as `@xorgate/react`'s `XorgateProvider`, plus the native slots
+(`randomId`, `wake`, `mqttConnect`, and a `platform` escape hatch).
+
+### Live telemetry
+
+Unchanged from the web package — `mqtt.js` 5 runs on React Native's global
+`WebSocket` as it is:
+
+```tsx
+const { latest, history, status, receivedAt } = useLiveTelemetry(deviceId)
+```
+
+Read freshness off `receivedAt`, not `status`. A phone that loses signal keeps
+a socket that reads `connected` until the OS surfaces the close, which can take
+20 s or more; the age of the last frame is the honest signal, and the web app
+treats it the same way.
+
+### Live video
+
+```tsx
+import { LiveVideo, useVideoChannels } from "@xorgate/react-native"
+
+const { data } = useVideoChannels(deviceId)
+const cam0 = data?.find((c) => c.streamKey === "cam0") ?? null
+
+<LiveVideo channel={cam0} style={{ aspectRatio: 16 / 9 }} />
+```
+
+`LiveVideo` is the view and nothing else: no card, no spinner, no status text,
+no aspect ratio of its own. Take `onStatusChange` for chrome, or drop to the
+hook:
+
+```tsx
+const { streamURL, status, stats, error } = useLiveVideo(cam0)
+```
+
+One behaviour `LiveVideo` adds over a bare `RTCView`: **the reconnect hold**.
+Every reconnect produces a new `MediaStream` with a new `streamURL`, and an
+`RTCView` pointed at a stream that has not decoded a frame is black — so a
+short blip would blank the picture, where a browser's `<video>` simply keeps
+its last frame. `LiveVideo` mounts the new stream underneath at zero opacity
+and promotes it only once the renderer reports its dimensions, falling back to
+the swap after 3 s so a dead stream cannot pin a stale frame. Render `RTCView`
+yourself and you own that.
+
+### Waking the live plane
+
+The foreground edge (`AppState` → `active`) is wired for you, and on a phone it
+matters more than anything else in this package: iOS suspends the app's sockets
+within seconds of it leaving the screen, so both the MQTT connection and the
+peer connection are usually dead when the user comes back. Without the nudge
+the live plane sits out a backoff of up to 30 s in front of them.
+
+Add "the network came back" — four lines, and it stays in your app so this
+package depends on neither network library:
+
+```ts
+import * as Network from "expo-network"
+
+const networkWake = (onWake: () => void) => {
+  const sub = Network.addNetworkStateListener((s) => {
+    if (s.isInternetReachable ?? s.isConnected) onWake()
+  })
+  return () => sub.remove()
+}
+
+<XorgateNativeProvider wake={[networkWake]} …>
+```
+
+With `@react-native-community/netinfo`:
+
+```ts
+const networkWake = (onWake: () => void) =>
+  NetInfo.addEventListener((s) => { if (s.isConnected) onWake() })
+```
+
+A wake is a hint, never a command: a feed that is connected or mid-connect
+ignores one, so firing twice costs nothing.
+
+## What is not here
+
+`@xorgate/react`'s browser-only exports — its `useLiveVideo`, `LiveVideo`,
+`useReplayPlayer`, `ReplayVideo` and the `browser*` platform helpers — are
+deliberately not re-exported: they need `HTMLVideoElement`, `window` or Media
+Source Extensions. `useReplayPlayerCore`, the timeline, the lanes and the clock
+**are** re-exported; the `expo-video` engine that binds them to a player
+arrives in 0.2.0.
 
 ## Scripts
 
 `npm run ci` = `typecheck` → `test` → `build` → `verify:tarball` (pack, install
-into an empty project, import as a consumer, scan for secret material).
+into an empty project, import it as a consumer with stub peers, check the
+export surface, scan for secret material).
+
+The suite runs under jsdom against doubles for `react-native` and
+`react-native-webrtc`, because neither has a Node build. It proves the wiring —
+which listener is attached, which prop the view gets, what happens across a
+reconnect — and nothing about pixels or hardware decode, which are measured by
+hand on a simulator and a phone.
+
 Publishing is manual (`npm publish --tag next` for pre-releases, `npm publish`
-for a final) by the maintainer; CI has no publish job on purpose.
+for a final); CI has no publish job on purpose.
 
 ## License
 
