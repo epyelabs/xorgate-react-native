@@ -4,6 +4,13 @@
 
 Replay: the recorded-media player, over `expo-video`.
 
+- **Needs `@xorgate/react` 0.2.1 or later**, which is where `useReplayTelemetry`
+  takes the player CORE rather than the browser wrapper — the change that lets a
+  React Native player drive replay telemetry at all. The declared range stays
+  `^0.2.0-next.1` because it already admits 0.2.1 and a tighter one cannot be
+  installed until 0.2.1 is on npm; the only way to get the wrong types is a
+  lockfile pinned at the pre-release, where `useReplayTelemetry(deviceId,
+  player)` will not typecheck. Publish `@xorgate/react` 0.2.1 first.
 - **`expo-video` is a new required peer.** It is the native player; there is no
   way to play a recorded segment without it, and an optional peer whose absence
   fails deep inside a lane is worse than one line of install (the same call
