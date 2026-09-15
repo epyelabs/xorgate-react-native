@@ -1,5 +1,9 @@
 # @xorgate/react-native
 
+[![npm](https://img.shields.io/npm/v/@xorgate/react-native.svg)](https://www.npmjs.com/package/@xorgate/react-native)
+[![CI](https://github.com/epyelabs/xorgate-react-native/actions/workflows/ci.yml/badge.svg)](https://github.com/epyelabs/xorgate-react-native/actions/workflows/ci.yml)
+[![license](https://img.shields.io/npm/l/@xorgate/react-native.svg)](./LICENSE)
+
 React Native adapters for [`@xorgate/react`](https://www.npmjs.com/package/@xorgate/react).
 Live telemetry over MQTT-over-WebSocket, live video over WebRTC rendered by
 `react-native-webrtc`'s `RTCView`, and recorded-media replay over `expo-video`
@@ -266,8 +270,9 @@ The transport (`play`, `pause`, `toggle`, `seek`, `setRate`, `setSkipGaps`,
 `stepBoundary`), the clock, the lanes and the per-lane `laneState` are the same
 ones the web package exposes — `useReplayPlayer` here is `useReplayPlayerCore`
 with native media bound to it. Everything is driven by wall-clock epoch ms, so
-`useReplayTelemetry(manifest, player.clock)` tracks the video without either
-side knowing about the other.
+`useReplayTelemetry(deviceId, player)` tracks the video without either side
+knowing about the other: it takes the player CORE, reads a timeline and a
+playhead, and has no idea what is playing the video.
 
 The manifest comes from `useReplayManifest(deviceId, …)`, or from your own API
 on the vended-direct auth mode — same rule as `useVideoChannels` above.
