@@ -5,14 +5,17 @@
  * re-exported here, so an app imports from ONE package: the data hooks, live
  * telemetry, the live-block policy, the replay timeline and clock, the
  * telemetry math, the types. What this package adds is the runtime underneath
- * them (`nativePlatform`, `XorgateNativeProvider`) and the two pieces that
- * cannot be neutral because they are pixels: `useLiveVideo` / `LiveVideo` over
- * react-native-webrtc's `RTCView`.
+ * them (`nativePlatform`, `XorgateNativeProvider`) and the pieces that cannot
+ * be neutral because they are pixels: `useLiveVideo` / `LiveVideo` over
+ * react-native-webrtc's `RTCView`, and `useReplayPlayer` / `ReplayVideo` over
+ * expo-video.
  *
  * The browser-only exports of `@xorgate/react` — its `useLiveVideo`,
  * `LiveVideo`, `useReplayPlayer`, `ReplayVideo` and the `browser*` platform
  * helpers — are deliberately NOT re-exported: they need `HTMLVideoElement`,
- * `window` or Media Source Extensions, none of which exist here. Importing
+ * `window` or Media Source Extensions, none of which exist here. The four
+ * names are SHADOWED by the native implementations above, so an app that
+ * imports from this package gets the one that works on a phone; importing
  * `@xorgate/react` directly still works and is how you reach them on web.
  */
 
@@ -38,6 +41,25 @@ export {
   type UseLiveVideoOptions,
 } from "./use-live-video.js";
 export { LiveVideo, type LiveVideoProps } from "./live-video.js";
+
+// ---------------------------------------------------------------------------
+// Replay (expo-video)
+// ---------------------------------------------------------------------------
+
+export {
+  ExpoVideoReplayEngine,
+  type ExpoVideoReplayEngineOptions,
+} from "./replay-engine.js";
+export {
+  useReplayPlayer,
+  type UseReplayPlayer,
+  type UseReplayPlayerNativeOptions,
+  type ReplayLaneMedia,
+  type ReplayLaneState,
+  type ReplayLaneStatus,
+  type UseReplayPlayerOptions,
+} from "./use-replay-player.js";
+export { ReplayVideo, type ReplayVideoProps } from "./replay-video.js";
 
 // ---------------------------------------------------------------------------
 // Re-exported unchanged from `@xorgate/react`

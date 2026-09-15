@@ -1,5 +1,93 @@
 # Changelog
 
+## 0.2.0
+
+Replay: the recorded-media player, over `expo-video`.
+
+- **`expo-video` is a new required peer.** It is the native player; there is no
+  way to play a recorded segment without it, and an optional peer whose absence
+  fails deep inside a lane is worse than one line of install (the same call
+  `expo-crypto` got in 0.1.0). Installing it moves the native fingerprint.
+- `useReplayPlayer(manifest, options)` — `@xorgate/react`'s
+  `useReplayPlayerCore` with native media bound to every lane. The transport,
+  the clock, the lanes and `laneState` are the web package's; what is added is
+  `lanePlayer(streamKey)` and `laneMedia(streamKey)`, and the pool of players
+  behind them. `createVideoPlayer` is manual memory, so the hook creates a
+  pair per lane lazily and releases it when the lane goes or the hook unmounts.
+- `<ReplayVideo player streamKey />` — both of a lane's views, the hidden one
+  at zero opacity, `nativeControls` off.
+- `ExpoVideoReplayEngine` — one lane over two players, implementing
+  `@xorgate/react`'s `ReplayEngine`. A phone has no Media Source Extensions:
+  `AVPlayer` and `ExoPlayer` play a FILE, and a recorded segment is a
+  self-contained fMP4 that cannot be concatenated at runtime. So a lane is two
+  players and a boundary is an opacity flip. Four decisions the real segments
+  forced, all measured before the code was written:
+  - **The boundary is the manifest's** `effectiveDurationMs`, not the file's
+    end — a segment's file runs past the next one's start and playing that tail
+    would show the same wall clock twice. `playToEnd` is the fallback for the
+    opposite case, a file shorter than the manifest claims.
+  - **Readiness is the `statusChange` event, never the `replaceAsync`
+    promise**, which resolves with `status` still `loading`; `bufferedPosition`
+    can answer for the previous item until then.
+  - **Prepare early, promote on time.** The next segment is loaded and parked
+    on its first frame half a second out, and played only when the outgoing
+    player actually reaches the boundary — swapping at the lead would silently
+    drop it, once per segment.
+  - **A cross-segment seek always loads onto the hidden player**, so the
+    outgoing picture stays up for the 1.3-5.3 s the download takes instead of
+    going black.
+- A failed segment load is probed with a one-byte ranged GET on the same
+  presigned URL, because a native player never reports the HTTP status: 403
+  becomes `onAuthError` (the manifest refresh, as in the browser engine) and
+  404/410 becomes a media error. Anything else retries.
+- `useReplayPlayer(manifest, { debug })` — every decision a lane makes, as one
+  line, off by default. A seam is tens of milliseconds wide and the native
+  player is the half you cannot step through, so a boundary that did NOT
+  happen has to be able to leave evidence. It is what found the four defects
+  below, none of which any test had caught.
+
+**Four things the device corrected, all at the same place: a segment boundary.**
+On the first real 3-segment session a whole 60 s segment vanished — 57.7 s of a
+145.6 s replay, silently — and it took all four lining up:
+
+1. **A preloaded player is not parked at 0.** One was caught at 15.68 s, and
+   promoting it would have started that segment a quarter of the way in. On
+   iOS a playback RATE is the transport, so setting the rate on a paused
+   preload starts it playing. The rate now goes only on the player that is
+   about to play, and the incoming player is seeked unconditionally rather
+   than only for a non-zero offset.
+2. **Promoting does not move the playhead.** The clock is paced BY the lane
+   and only learns the new position on its next tick, so the very next
+   `ensureAt` arrives with a timestamp a few milliseconds BEFORE the boundary
+   — which dragged the lane back into the segment it had just left, which the
+   next tick undid, and so on. A move back into a just-crossed segment is now
+   ignored for a second.
+3. **The boundary must be released whether or not the player says so.** The
+   last `timeUpdate` of a segment lands 60-80 ms short of the file's end, and
+   `playToEnd` / `playingChange` follow a beat later. A timer armed when the
+   lead-in is prepared — for the expected end plus 120 ms — closes that, and
+   deliberately fires LATE: early skips real video, late only holds a frame.
+   A segment's end is `min(manifest, file)`, because a file can fall short of
+   what the manifest claims (60.000 s claimed, 59.987 s of media).
+4. **A lane waiting on a prepared lead-in must not report itself stalled.**
+   It did, so the player core's stall recovery ran — and with the playhead
+   already inside the NEXT segment, that recovery seeks to the END of it.
+   That is the line that actually ate the 57.7 s.
+
+Two more it showed, away from the boundary:
+
+- **A seek holds the outgoing picture STILL**, not merely on screen. The
+  outgoing player used to keep playing for the seconds a cross-segment
+  download takes — six of them, on one measured seek — while the transport bar
+  already read the seek target, so the picture and the clock were describing
+  different moments. A boundary lead-in is deliberately exempt: there the
+  outgoing segment is still the right one, right up to its last frame.
+- **A torn-down lane dies quietly.** The players belong to the hook, and one
+  that has been released throws `NotFoundException` on every access; the hook
+  now destroys engines before releasing players rather than trusting React's
+  cleanup order, and an engine handed a dead pair goes inert instead of
+  throwing into the tree.
+
 ## 0.1.0
 
 First release: live telemetry and live video on React Native, over
