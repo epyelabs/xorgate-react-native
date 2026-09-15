@@ -196,6 +196,32 @@ describe("LiveVideo", () => {
     expect(urls()).toEqual([{ streamURL: "url:remote-b", opacity: 1 }]);
   });
 
+  it("reports the displayed stream, which lags the session's across a hold", async () => {
+    const { wrapper, attempts } = setup();
+    const displayed: Array<string | null> = [];
+    render(
+      createElement(LiveVideo, {
+        channel: CHANNEL,
+        onDisplayedStreamChange: (url) => displayed.push(url),
+      }),
+      { wrapper },
+    );
+    await flush();
+    await deliverStream(attempts[0]!, "remote-a");
+    await act(async () => {
+      attempts[0]!.signaling.emit("close");
+      emitAppState("active");
+    });
+    await flush();
+    await deliverStream(attempts[1]!, "remote-b");
+
+    // The session is already on B; the screen is still showing A.
+    expect(displayed).toEqual([null, "url:remote-a"]);
+
+    await act(async () => fireDimensions("url:remote-b"));
+    expect(displayed).toEqual([null, "url:remote-a", "url:remote-b"]);
+  });
+
   it("reports every status transition and the video's dimensions", async () => {
     const { wrapper, attempts } = setup();
     const statuses: string[] = [];

@@ -24,6 +24,7 @@ export default defineConfig({
         replacement: path.join(here, "test/doubles/react-native-webrtc.tsx"),
       },
       { find: /^react-native$/, replacement: path.join(here, "test/doubles/react-native.tsx") },
+      { find: /^expo-crypto$/, replacement: path.join(here, "test/doubles/expo-crypto.ts") },
     ],
   },
   test: {

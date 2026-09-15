@@ -44,7 +44,12 @@
       "import": "./dist/polyfills.js",
       "default": "./dist/polyfills.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./webcrypto": {
+      "types": "./dist/webcrypto.d.ts",
+      "import": "./dist/webcrypto.js",
+      "default": "./dist/webcrypto.js"
+    }
   },
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -64,12 +69,13 @@
     "verify:tarball": "node scripts/verify-tarball.mjs"
   },
   "peerDependencies": {
-    "expo-crypto": "*",
+    "expo-crypto": ">=13.0.0",
     "react": "^18.2.0 || ^19.0.0",
     "react-native": ">=0.76.0",
     "react-native-webrtc": ">=124.0.0"
   },
   "dependencies": {
+    "@aws-crypto/sha256-js": "^5.2.0",
     "@xorgate/react": "^0.2.0-next.1"
   },
   "devDependencies": {
@@ -85,10 +91,5 @@
     "react-native-webrtc": "^124.0.8",
     "typescript": "^5.7.2",
     "vitest": "^3.0.0"
-  },
-  "peerDependenciesMeta": {
-    "expo-crypto": {
-      "optional": true
-    }
   }
 }

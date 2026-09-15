@@ -1,12 +1,11 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { nativePlatform } from "../src/platform.js";
+import { resetExpoCrypto } from "./doubles/expo-crypto.js";
 import { appStateListenerCount, emitAppState } from "./doubles/react-native.js";
 import { RTCPeerConnection } from "./doubles/react-native-webrtc.js";
 
-// jsdom defines `crypto` as a getter-only property, so a plain assignment
-// throws; `stubGlobal` redefines it and `unstubAllGlobals` puts it back.
-afterEach(() => {
-  vi.unstubAllGlobals();
+beforeEach(() => {
+  resetExpoCrypto();
 });
 
 describe("nativePlatform", () => {
@@ -47,16 +46,37 @@ describe("nativePlatform", () => {
     expect(platform.createWebRtcPlatform!().randomId()).toBe("id-1");
   });
 
-  it("falls back to the crypto global when no randomId is given", () => {
-    vi.stubGlobal("crypto", { randomUUID: () => "from-global" });
-    expect(nativePlatform().randomId!()).toBe("from-global");
+  it("draws entropy from expo-crypto by default, not from a crypto global", () => {
+    // Hermes has no `crypto` global at all, so there is nothing else to
+    // default to — and the failure would be at the first MQTT connect, deep
+    // inside the credential resolver, not at the provider.
+    vi.stubGlobal("crypto", undefined);
+    const platform = nativePlatform();
+    expect(platform.randomId!()).toBe("expo-crypto-uuid-1");
+    expect(platform.createWebRtcPlatform!().randomId()).toBe("expo-crypto-uuid-2");
+    vi.unstubAllGlobals();
   });
 
-  it("names both fixes when the runtime has no crypto global (Hermes)", () => {
+  it("tells you to add the polyfill when the runtime has no crypto global", async () => {
+    // What actually happens without it: @smithy/core's React Native bundle
+    // dereferences a bare `crypto` and the viewer retries a ReferenceError
+    // forever. The guard turns that into an instruction.
     vi.stubGlobal("crypto", undefined);
-    expect(() => nativePlatform().randomId!()).toThrow(
-      /@xorgate\/react-native\/polyfills.*randomId/s,
-    );
+    const webrtc = nativePlatform().createWebRtcPlatform!();
+    await expect(
+      webrtc.getViewerEndpoints("arn:x", "us-east-1", {} as never),
+    ).rejects.toThrow(/@xorgate\/react-native\/polyfills/);
+    vi.unstubAllGlobals();
+  });
+
+  it("guards only the first AWS call, leaving the rest of the platform alone", () => {
+    // The guard must not become a second implementation of the platform: the
+    // peer connection and the entropy are still the ones built above.
+    vi.stubGlobal("crypto", undefined);
+    const webrtc = nativePlatform({ randomId: () => "id" }).createWebRtcPlatform!();
+    expect(webrtc.randomId()).toBe("id");
+    expect(webrtc.createPeerConnection([])).toBeInstanceOf(RTCPeerConnection);
+    vi.unstubAllGlobals();
   });
 
   it("wakes on the foreground edge", () => {

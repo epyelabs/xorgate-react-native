@@ -73,6 +73,12 @@ export class MediaStream {}
 export const RTCView = () => null;
 `,
   );
+  stub(
+    "expo-crypto",
+    `export const randomUUID = () => "stub-uuid";
+export const getRandomValues = (a) => a;
+`,
+  );
 
   writeFileSync(
     path.join(work, "probe.mjs"),
@@ -126,6 +132,10 @@ assert.equal(typeof platform.createWebRtcPlatform, "function");
 assert.equal(typeof platform.subscribeWake, "function");
 assert.equal(platform.randomId(), "fixed-id");
 assert.equal(platform.createWebRtcPlatform().randomId(), "fixed-id");
+
+// Entropy defaults to expo-crypto: Hermes has no crypto global to fall back
+// to, and a default that throws would surface at the first MQTT connect.
+assert.equal(xg.nativePlatform().randomId(), "stub-uuid");
 
 console.log("consumer import ok");
 `,

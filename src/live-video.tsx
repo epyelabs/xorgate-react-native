@@ -6,7 +6,11 @@ import { RTCView } from "react-native-webrtc";
 import type { RTCVideoViewProps } from "react-native-webrtc";
 import type { VideoChannel, XorgateError } from "@xorgate/react";
 import { useLiveVideo } from "./use-live-video.js";
-import type { LiveVideoStatus, UseLiveVideoOptions } from "./use-live-video.js";
+import type {
+  LiveVideoStats,
+  LiveVideoStatus,
+  UseLiveVideoOptions,
+} from "./use-live-video.js";
 
 /** How long to keep the outgoing picture if the incoming stream never reports a frame. */
 const HOLD_TIMEOUT_MS = 3000;
@@ -20,8 +24,15 @@ export interface LiveVideoProps extends Omit<ViewProps, "children"> {
   mirror?: RTCVideoViewProps["mirror"];
   /** Called on every transition. The component renders no status chrome of its own. */
   onStatusChange?: (status: LiveVideoStatus, error: XorgateError | null) => void;
+  /** Each inbound-rtp sample, for a stats row. Null between sessions. */
+  onStats?: (stats: LiveVideoStats | null) => void;
   /** The encoded size of the picture on screen, as the renderer reports it. */
   onVideoDimensions?: (dimensions: { width: number; height: number }) => void;
+  /**
+   * The stream actually ON SCREEN, which during a reconnect lags the session's
+   * by the length of the hold below. Null while nothing is displayed.
+   */
+  onDisplayedStreamChange?: (streamURL: string | null) => void;
 }
 
 /**
@@ -49,18 +60,26 @@ export function LiveVideo(props: LiveVideoProps): ReactNode {
     zOrder,
     mirror,
     onStatusChange,
+    onStats,
     onVideoDimensions,
+    onDisplayedStreamChange,
     style,
     ...viewProps
   } = props;
 
-  const { streamURL, status, error } = useLiveVideo(channel, options);
+  const { streamURL, status, error, stats } = useLiveVideo(channel, options);
 
   const onStatusChangeRef = useRef(onStatusChange);
   onStatusChangeRef.current = onStatusChange;
   useEffect(() => {
     onStatusChangeRef.current?.(status, error);
   }, [status, error]);
+
+  const onStatsRef = useRef(onStats);
+  onStatsRef.current = onStats;
+  useEffect(() => {
+    onStatsRef.current?.(stats);
+  }, [stats]);
 
   const onVideoDimensionsRef = useRef(onVideoDimensions);
   onVideoDimensionsRef.current = onVideoDimensions;
@@ -97,6 +116,12 @@ export function LiveVideo(props: LiveVideoProps): ReactNode {
     setShown(url);
     setIncoming((current) => (current === url ? null : current));
   };
+
+  const onDisplayedStreamChangeRef = useRef(onDisplayedStreamChange);
+  onDisplayedStreamChangeRef.current = onDisplayedStreamChange;
+  useEffect(() => {
+    onDisplayedStreamChangeRef.current?.(shown);
+  }, [shown]);
 
   return (
     <View style={style} {...viewProps}>

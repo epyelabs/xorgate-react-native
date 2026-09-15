@@ -22,10 +22,13 @@ platform-neutral because they are pixels.
 npx expo install @xorgate/react-native react-native-webrtc @config-plugins/react-native-webrtc expo-crypto
 ```
 
-Peers: `react`, `react-native`, `react-native-webrtc`; `expo-crypto` is
-optional and only used by the `/polyfills` entry. `@xorgate/react` is a
-dependency, not a peer — one resolved copy is what makes `instanceof
-XorgateError` hold across the boundary.
+Peers: `react`, `react-native`, `react-native-webrtc`, `expo-crypto`.
+`@xorgate/react` is a dependency, not a peer — one resolved copy is what makes
+`instanceof XorgateError` hold across the boundary.
+
+`expo-crypto` is required, not optional: Hermes ships **no `crypto` global at
+all** — not `randomUUID`, not `getRandomValues`, not `subtle` — and every MQTT
+and signaling client id needs entropy, so there is nothing else to default to.
 
 Add the config plugin to `app.json` / `app.config.ts`:
 
@@ -54,7 +57,7 @@ android: { blockedPermissions: ["android.permission.RECORD_AUDIO", "android.perm
 
 ## Metro setup
 
-`@xorgate/react`'s AWS / KVS / mqtt tree bundles under Metro with three
+`@xorgate/react`'s AWS / KVS / mqtt tree bundles under Metro with four
 resolver rules. They are mechanical and package-agnostic — they read each
 package's own `package.json` — so paste this into `metro.config.js` once:
 
@@ -115,11 +118,30 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
     return { type: "sourceFile", filePath: require.resolve("ws/browser.js", { paths: [__dirname] }) }
   }
 
+  // (4) `isomorphic-webcrypto` -> this package's WebCrypto subset. The real
+  // package's React Native build evaluates to `undefined` on Hermes (its
+  // export is assembled behind an msrcrypto PRNG promise, and it wants
+  // `expo-random`, gone from the Expo SDK after 51), so the KVS signaling
+  // client dies with "Cannot read property 'subtle' of undefined" the first
+  // time a viewer connects.
+  if (moduleName === "isomorphic-webcrypto") {
+    return {
+      type: "sourceFile",
+      filePath: require.resolve("@xorgate/react-native/webcrypto", { paths: [__dirname] }),
+    }
+  }
+
   return (previous ?? context.resolveRequest)(context, moduleName, platform)
 }
 
 module.exports = config
 ```
+
+`@xorgate/react-native/webcrypto` covers exactly the three calls the SigV4
+signer makes — `digest(SHA-256)`, `importKey("raw", HMAC)`, `sign(HMAC)` —
+over `@aws-crypto/sha256-js`, which is already in the tree. All three are
+deterministic hashing, so the entropy msrcrypto was adding is not used on this
+path; anything outside those three throws by name rather than answering wrong.
 
 Nothing else was needed on Expo SDK 57 / Hermes: no `buffer`, `process`,
 `events`, `url`, stream or URL polyfill, measured rather than assumed.
@@ -129,17 +151,36 @@ it breaks `react-native-safe-area-context`'s codegen spec.
 
 ## Polyfill
 
-Hermes ships no `crypto` global at all — not `randomUUID`, not
-`getRandomValues`, not `subtle`. Add one line at the very top of your entry
-file, before anything that reaches the SDK:
+Add one line at the very top of your entry file, before anything that reaches
+the SDK:
 
 ```ts
 import "@xorgate/react-native/polyfills"
 ```
 
-It installs `getRandomValues` and `randomUUID` from `expo-crypto`, additively
-(an existing `crypto` keeps everything it already has). Without `expo-crypto`,
-skip the import and pass your own `randomId` to the provider instead.
+It installs `getRandomValues` and `randomUUID` from `expo-crypto` onto
+`globalThis.crypto`, additively (an existing `crypto` keeps everything it
+already has).
+
+**Live video does not work without it.** Not because of this package —
+`nativePlatform()` covers the SDK's own entropy through the `randomId` slot,
+and live telemetry runs with no polyfill at all — but because of the AWS SDK
+underneath the KVS viewer. `@smithy/core`'s React Native serde bundle ends its
+UUID v4 path in
+
+```js
+const _getRandomValues = (array) => crypto.getRandomValues(array)
+```
+
+with a **bare** `crypto`, and that is the fallback `bindV4` selects precisely
+when `typeof crypto === "undefined"` — so the guard hands control to the one
+line that cannot survive the case it guards against. On Hermes the first
+`GetSignalingChannelEndpoint` call then throws `Property 'crypto' doesn't
+exist`, the session treats it as a network error, and the viewer retries
+forever on a backoff. (Measured on Expo SDK 57 / Hermes, `@smithy/core` 3.34.1,
+2026-09-15. The same bug was fixed for the Node build in
+smithy-typescript#2022; the browser and React Native builds were not changed —
+smithy-typescript#2276.)
 
 ## Use
 
@@ -183,9 +224,17 @@ const cam0 = data?.find((c) => c.streamKey === "cam0") ?? null
 <LiveVideo channel={cam0} style={{ aspectRatio: 16 / 9 }} />
 ```
 
+`useVideoChannels` is a REST read, so it needs an auth mode that HAS a REST
+credential. An app on `auth={{ getLiveCredentials }}` — the vended-direct mode,
+where your own backend mints the credential and your users have no xorgate
+identity — gets `INVALID_CONFIG` from it by design, and should fetch the
+channel list from its own API and hand the `VideoChannel` to `LiveVideo`
+directly. The live and replay planes are the parts that mode reaches.
+
 `LiveVideo` is the view and nothing else: no card, no spinner, no status text,
-no aspect ratio of its own. Take `onStatusChange` for chrome, or drop to the
-hook:
+no aspect ratio of its own. Take `onStatusChange`, `onStats`,
+`onVideoDimensions` and `onDisplayedStreamChange` for chrome of your own, or
+drop to the hook:
 
 ```tsx
 const { streamURL, status, stats, error } = useLiveVideo(cam0)

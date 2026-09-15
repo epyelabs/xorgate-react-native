@@ -1,13 +1,13 @@
+import { randomUUID } from "expo-crypto";
 import type { XorgatePlatform } from "@xorgate/react";
 import { createNativeWebRtcPlatform } from "./webrtc-platform.js";
 import { appStateWake, composeWake, type WakeSource } from "./wake.js";
 
 export interface NativePlatformOptions {
   /**
-   * Client-id entropy for MQTT and KVS signaling. Default: the `crypto`
-   * global, which Hermes does NOT ship — import `@xorgate/react-native/polyfills`
-   * once at the top of your entry file (Expo, one line, from expo-crypto), or
-   * pass your own here.
+   * Client-id entropy for MQTT and KVS signaling. Default: `expo-crypto`'s
+   * `randomUUID()`. Hermes has no `crypto` global, so there is nothing else
+   * to default to; pass your own only to use a different source.
    */
   randomId?: () => string;
   /**
@@ -33,7 +33,7 @@ export interface NativePlatformOptions {
  * are composing the platform with slots of your own.
  */
 export function nativePlatform(options: NativePlatformOptions = {}): XorgatePlatform {
-  const randomId = options.randomId ?? globalRandomId;
+  const randomId = options.randomId ?? randomUUID;
   return {
     createWebRtcPlatform: () => createNativeWebRtcPlatform(randomId),
     subscribeWake: options.wake?.length
@@ -42,20 +42,4 @@ export function nativePlatform(options: NativePlatformOptions = {}): XorgatePlat
     randomId,
     ...(options.mqttConnect ? { mqttConnect: options.mqttConnect } : {}),
   };
-}
-
-/**
- * `crypto.randomUUID()` if the runtime has one, with an error that names both
- * fixes if it does not. Hermes on Expo SDK 57 has no `crypto` global at all —
- * not `randomUUID`, not `getRandomValues`, not `subtle`.
- */
-function globalRandomId(): string {
-  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
-  if (!c || typeof c.randomUUID !== "function") {
-    throw new Error(
-      "This runtime has no crypto.randomUUID(). Add `import \"@xorgate/react-native/polyfills\"` " +
-        "to the top of your entry file, or pass `randomId` to nativePlatform().",
-    );
-  }
-  return c.randomUUID();
 }
