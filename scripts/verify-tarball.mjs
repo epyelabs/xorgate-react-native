@@ -79,6 +79,12 @@ export const RTCView = () => null;
 export const getRandomValues = (a) => a;
 `,
   );
+  stub(
+    "expo-video",
+    `export const createVideoPlayer = () => ({});
+export const VideoView = () => null;
+`,
+  );
 
   writeFileSync(
     path.join(work, "probe.mjs"),
@@ -95,6 +101,9 @@ for (const name of [
   "XorgateNativeProvider",
   "useLiveVideo",
   "LiveVideo",
+  "useReplayPlayer",
+  "ReplayVideo",
+  "ExpoVideoReplayEngine",
 ]) {
   assert.equal(typeof xg[name], "function", \`\${name} is not exported as a function\`);
 }
@@ -118,13 +127,19 @@ for (const name of [
   assert.ok(xg[name] !== undefined, \`\${name} is missing from the re-export surface\`);
 }
 
-// The browser-only hooks must NOT be here: they need HTMLVideoElement or MSE,
-// and re-exporting them would let an app import something that throws on a
-// phone. \`useLiveVideo\` and \`LiveVideo\` are shadowed by the native ones,
-// checked above.
-for (const name of ["useReplayPlayer", "ReplayVideo", "browserPlatform", "browserRandomId"]) {
+// The browser-only helpers must NOT be here: they need HTMLVideoElement,
+// \`window\` or MSE, and re-exporting them would let an app import something
+// that throws on a phone. \`useLiveVideo\`, \`LiveVideo\`, \`useReplayPlayer\` and
+// \`ReplayVideo\` are SHADOWED by the native ones, asserted above — so the
+// check here is that the shadowing really happened and did not leave the
+// browser implementation in place.
+for (const name of ["browserPlatform", "browserRandomId"]) {
   assert.equal(xg[name], undefined, \`\${name} is browser-only and must not be re-exported\`);
 }
+assert.ok(
+  !String(xg.ReplayVideo).includes("laneVideoRef"),
+  "ReplayVideo is @xorgate/react's browser component, not the native one",
+);
 
 // The platform object is assembled correctly without a React render.
 const platform = xg.nativePlatform({ randomId: () => "fixed-id" });

@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.2.0
+
+Replay: the recorded-media player, over `expo-video`.
+
+- **`expo-video` is a new required peer.** It is the native player; there is no
+  way to play a recorded segment without it, and an optional peer whose absence
+  fails deep inside a lane is worse than one line of install (the same call
+  `expo-crypto` got in 0.1.0). Installing it moves the native fingerprint.
+- `useReplayPlayer(manifest, options)` — `@xorgate/react`'s
+  `useReplayPlayerCore` with native media bound to every lane. The transport,
+  the clock, the lanes and `laneState` are the web package's; what is added is
+  `lanePlayer(streamKey)` and `laneMedia(streamKey)`, and the pool of players
+  behind them. `createVideoPlayer` is manual memory, so the hook creates a
+  pair per lane lazily and releases it when the lane goes or the hook unmounts.
+- `<ReplayVideo player streamKey />` — both of a lane's views, the hidden one
+  at zero opacity, `nativeControls` off.
+- `ExpoVideoReplayEngine` — one lane over two players, implementing
+  `@xorgate/react`'s `ReplayEngine`. A phone has no Media Source Extensions:
+  `AVPlayer` and `ExoPlayer` play a FILE, and a recorded segment is a
+  self-contained fMP4 that cannot be concatenated at runtime. So a lane is two
+  players and a boundary is an opacity flip. Four decisions the real segments
+  forced, all measured before the code was written:
+  - **The boundary is the manifest's** `effectiveDurationMs`, not the file's
+    end — a segment's file runs past the next one's start and playing that tail
+    would show the same wall clock twice. `playToEnd` is the fallback for the
+    opposite case, a file shorter than the manifest claims.
+  - **Readiness is the `statusChange` event, never the `replaceAsync`
+    promise**, which resolves with `status` still `loading`; `bufferedPosition`
+    can answer for the previous item until then.
+  - **Prepare early, promote on time.** The next segment is loaded and parked
+    on its first frame half a second out, and played only when the outgoing
+    player actually reaches the boundary — swapping at the lead would silently
+    drop it, once per segment.
+  - **A cross-segment seek always loads onto the hidden player**, so the
+    outgoing picture stays up for the 1.3-5.3 s the download takes instead of
+    going black.
+- A failed segment load is probed with a one-byte ranged GET on the same
+  presigned URL, because a native player never reports the HTTP status: 403
+  becomes `onAuthError` (the manifest refresh, as in the browser engine) and
+  404/410 becomes a media error. Anything else retries.
+
 ## 0.1.0
 
 First release: live telemetry and live video on React Native, over

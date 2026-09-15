@@ -1,28 +1,28 @@
 # @xorgate/react-native
 
 React Native adapters for [`@xorgate/react`](https://www.npmjs.com/package/@xorgate/react).
-Live telemetry over MQTT-over-WebSocket and live video over WebRTC, rendered by
-`react-native-webrtc`'s `RTCView` — a real native video view with hardware
-H.264 decode behind it, not a web player in a shell.
+Live telemetry over MQTT-over-WebSocket, live video over WebRTC rendered by
+`react-native-webrtc`'s `RTCView`, and recorded-media replay over `expo-video`
+— real native video views with hardware H.264 decode behind them, not a web
+player in a shell.
 
 Everything pure or platform-neutral — the KVS session hardening, the telemetry
 feed, the timeline, lanes, the replay clock, the telemetry math, the data hooks
 — lives in `@xorgate/react` and is **re-exported from here**, so your app
 imports from one package. What this package adds is the runtime underneath
-(`nativePlatform`, `XorgateNativeProvider`) and the two things that cannot be
+(`nativePlatform`, `XorgateNativeProvider`) and the things that cannot be
 platform-neutral because they are pixels.
-
-**0.1.0 ships telemetry and live video.** Replay over `expo-video` is 0.2.0.
 
 **Full reference: [docs.xorgate.io/docs/frontend-sdk](https://docs.xorgate.io/docs/frontend-sdk)**
 
 ## Install
 
 ```bash
-npx expo install @xorgate/react-native react-native-webrtc @config-plugins/react-native-webrtc expo-crypto
+npx expo install @xorgate/react-native react-native-webrtc @config-plugins/react-native-webrtc expo-crypto expo-video
 ```
 
-Peers: `react`, `react-native`, `react-native-webrtc`, `expo-crypto`.
+Peers: `react`, `react-native`, `react-native-webrtc`, `expo-crypto`,
+`expo-video`.
 `@xorgate/react` is a dependency, not a peer — one resolved copy is what makes
 `instanceof XorgateError` hold across the boundary.
 
@@ -37,7 +37,8 @@ Add the config plugin to `app.json` / `app.config.ts`:
 ```
 
 **A development build is required.** `react-native-webrtc` is a native module,
-so Expo Go cannot run it.
+so Expo Go cannot run it. `expo-video` is a native module too, and adding
+either moves the native fingerprint: a Metro reload will not pick it up.
 
 The plugin writes both an `NSCameraUsageDescription` and an
 `NSMicrophoneUsageDescription`, and on Android adds `CAMERA`, `RECORD_AUDIO`,
@@ -249,6 +250,51 @@ and promotes it only once the renderer reports its dimensions, falling back to
 the swap after 3 s so a dead stream cannot pin a stale frame. Render `RTCView`
 yourself and you own that.
 
+### Replay
+
+```tsx
+import { ReplayVideo, useReplayPlayer } from "@xorgate/react-native"
+
+const player = useReplayPlayer(manifest, { startTs })
+
+<ReplayVideo player={player} streamKey="cam0" style={{ aspectRatio: 16 / 9 }} />
+<Text>{new Date(player.playheadTs).toISOString()}</Text>
+<Button title={player.playing ? "Pause" : "Play"} onPress={player.toggle} />
+```
+
+The transport (`play`, `pause`, `toggle`, `seek`, `setRate`, `setSkipGaps`,
+`stepBoundary`), the clock, the lanes and the per-lane `laneState` are the same
+ones the web package exposes — `useReplayPlayer` here is `useReplayPlayerCore`
+with native media bound to it. Everything is driven by wall-clock epoch ms, so
+`useReplayTelemetry(manifest, player.clock)` tracks the video without either
+side knowing about the other.
+
+The manifest comes from `useReplayManifest(deviceId, …)`, or from your own API
+on the vended-direct auth mode — same rule as `useVideoChannels` above.
+
+**A lane is two players, not one.** A phone has no Media Source Extensions:
+`AVPlayer` and `ExoPlayer` play a FILE, and every recorded segment is a
+self-contained fMP4 that cannot be concatenated at runtime. So each lane gets a
+pair — one showing the current segment while the other already holds the next —
+and `ReplayVideo` mounts both views, the hidden one at zero opacity. A segment
+boundary is then an opacity flip between two live views. The incoming player is
+prepared half a second early but **not played until the outgoing one actually
+reaches the manifest boundary**, which is what keeps the playhead continuous
+across a seam instead of skipping the lead once per segment.
+
+Render the views yourself with `player.laneMedia(streamKey)` (both players and
+which is in front) or `player.lanePlayer(streamKey)` (just the front one, if
+you can live with a reload at every boundary). `nativeControls` stays off: the
+clock owns the transport, and a native scrubber would drive one segment's file
+rather than the replay.
+
+A **seek across segments is download-bound** — a whole 6-13 MB segment, 1.3-5.3
+s on a good connection — because that is what `replaceAsync` fetches. The
+outgoing picture is held throughout rather than going black, and
+`player.laneState(streamKey)` plus `player.clock` are what a scrubber should
+read. If you build a scrub thumb, seek as the thumb MOVES, not only on release:
+the intermediate seeks warm the player the release will land on.
+
 ### Waking the live plane
 
 The foreground edge (`AppState` → `active`) is wired for you, and on a phone it
@@ -288,9 +334,10 @@ ignores one, so firing twice costs nothing.
 `@xorgate/react`'s browser-only exports — its `useLiveVideo`, `LiveVideo`,
 `useReplayPlayer`, `ReplayVideo` and the `browser*` platform helpers — are
 deliberately not re-exported: they need `HTMLVideoElement`, `window` or Media
-Source Extensions. `useReplayPlayerCore`, the timeline, the lanes and the clock
-**are** re-exported; the `expo-video` engine that binds them to a player
-arrives in 0.2.0.
+Source Extensions. The four names are SHADOWED here by the native
+implementations, so importing from this package always gets the one that works
+on a phone. `useReplayPlayerCore`, the timeline, the lanes, the clock and the
+replay telemetry math **are** re-exported unchanged.
 
 ## Scripts
 
@@ -298,8 +345,8 @@ arrives in 0.2.0.
 into an empty project, import it as a consumer with stub peers, check the
 export surface, scan for secret material).
 
-The suite runs under jsdom against doubles for `react-native` and
-`react-native-webrtc`, because neither has a Node build. It proves the wiring —
+The suite runs under jsdom against doubles for `react-native`,
+`react-native-webrtc` and `expo-video`, because none of them has a Node build. It proves the wiring —
 which listener is attached, which prop the view gets, what happens across a
 reconnect — and nothing about pixels or hardware decode, which are measured by
 hand on a simulator and a phone.
