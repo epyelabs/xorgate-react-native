@@ -10,7 +10,11 @@
  * outgoing picture survives a seek.
  */
 import { describe, expect, it, vi } from "vitest";
-import { buildTimeline, type ReplaySegment, type ReplayTimeline } from "@xorgate/react";
+import {
+  buildTimeline,
+  type ReplaySegment,
+  type ReplayTimeline,
+} from "@xorgate/react";
 import { ExpoVideoReplayEngine } from "../src/replay-engine.js";
 import { asNative, FakeVideoPlayer } from "./doubles/expo-video.js";
 
@@ -54,7 +58,8 @@ interface Harness {
 
 function harness(overrides: { segments?: ReplaySegment[] } = {}): Harness {
   const segs = overrides.segments ?? segments();
-  const to = segs[segs.length - 1].startTs + segs[segs.length - 1].effectiveDurationMs;
+  const to =
+    segs[segs.length - 1].startTs + segs[segs.length - 1].effectiveDurationMs;
   const timeline = buildTimeline({ segments: segs, gaps: [] }, FROM, to);
   const players: [FakeVideoPlayer, FakeVideoPlayer] = [
     new FakeVideoPlayer(),
@@ -183,6 +188,82 @@ describe("ExpoVideoReplayEngine", () => {
     expect(h.engine.position).toBeCloseTo(145, 3);
   });
 
+  it("crosses a boundary whose file falls a few ms short of the manifest", async () => {
+    const h = harness();
+    await startPlaying(h);
+    const showing = h.front();
+    const next = h.hidden();
+    // What the real seq-0 segment does: 60.000 s claimed, 59.987 s of file.
+    showing.duration = 59.987;
+
+    showing.emitTime(59.6); // lead-in prepared
+    expect(next.playing).toBe(false);
+
+    // The 50 ms cadence never lands on 59.987, and this file emits no
+    // `playToEnd` — the two ways a strict boundary test silently never fires.
+    showing.emitTime(59.95);
+
+    expect(h.engine.activeIndex).toBe(next === h.players[0] ? 0 : 1);
+    expect(next.playing).toBe(true);
+    expect(h.engine.position).toBeCloseTo(60, 2);
+  });
+
+  it("swaps on the player stopping by itself when no other signal arrives", async () => {
+    const h = harness();
+    await startPlaying(h);
+    const showing = h.front();
+    const next = h.hidden();
+    showing.duration = 60;
+
+    showing.emitTime(59.6); // lead-in prepared, not released
+    expect(h.engine.activeIndex).toBe(showing === h.players[0] ? 0 : 1);
+
+    // No further `timeUpdate`, no `playToEnd`: the native player simply stops.
+    showing.stopOnItsOwn();
+    expect(h.engine.activeIndex).toBe(next === h.players[0] ? 0 : 1);
+    expect(next.playing).toBe(true);
+  });
+
+  it("does not report a prepared lead-in as a stall", async () => {
+    const h = harness();
+    await startPlaying(h);
+    const showing = h.front();
+    showing.emitTime(59.6);
+
+    // The core's stall recovery reads this. Answering `true` here sends it
+    // into a boundary the engine is one event away from crossing — and since
+    // the playhead is already inside the NEXT segment, its recovery jumps to
+    // the END of that segment and skips the whole thing. Measured on the
+    // device before this guard existed: 57.7 s of a 145.6 s replay gone.
+    expect(h.engine.isStalled()).toBe(false);
+
+    // Even with the outgoing player reporting a buffer underrun at its own
+    // file end, which is how the device got there.
+    showing.emitStatus("loading");
+    expect(h.engine.isStalled()).toBe(false);
+  });
+
+  it("releases a prepared lead-in from the pump if nothing else did", async () => {
+    const h = harness();
+    await startPlaying(h);
+    const showing = h.front();
+    const next = h.hidden();
+    showing.emitTime(59.6);
+    expect(h.engine.activeIndex).toBe(showing === h.players[0] ? 0 : 1);
+
+    // Nothing at all arrives: no time update, no stop, no end. The watchdog
+    // is the only thing between that and a lane frozen forever, because a
+    // player that is out of content still reports itself `readyToPlay`.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.now() + 500);
+      h.engine.ensureAt(FROM + 59_700);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(h.engine.activeIndex).toBe(next === h.players[0] ? 0 : 1);
+  });
+
   it("treats playToEnd as the boundary when the file is shorter than the manifest", async () => {
     const h = harness();
     await startPlaying(h);
@@ -308,7 +389,10 @@ describe("ExpoVideoReplayEngine", () => {
 
   it("reports a segment that is really gone as a media error", async () => {
     const h = harness();
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 404, ok: false }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ status: 404, ok: false }),
+    );
     try {
       h.engine.ensureAt(FROM);
       await Promise.resolve();

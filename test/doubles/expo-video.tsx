@@ -31,6 +31,8 @@ export class FakeVideoPlayer {
   loop = true;
   timeUpdateEventInterval = 0;
   released = false;
+  /** The file's own length. 0 until something is loaded, as expo-video reports it. */
+  duration = 0;
 
   /** Every source this player was handed, in order. */
   readonly loads: VideoSource[] = [];
@@ -57,6 +59,7 @@ export class FakeVideoPlayer {
   play(): void {
     this.playing = true;
     this.transport.push("play");
+    this.emit("playingChange", { isPlaying: true });
   }
 
   pause(): void {
@@ -64,11 +67,18 @@ export class FakeVideoPlayer {
     this.transport.push("pause");
   }
 
+  /** The native side stops on its own: the file ran out. */
+  stopOnItsOwn(): void {
+    this.playing = false;
+    this.emit("playingChange", { isPlaying: false });
+  }
+
   replaceAsync(source: VideoSource): Promise<void> {
     this.loads.push(source);
     this.status = source === null ? "idle" : "loading";
     this.currentTime = 0;
     this.bufferedPosition = 0;
+    this.duration = 0;
     if (!this.deferLoads) return Promise.resolve();
     return new Promise<void>((resolve) => {
       this.pending.push(resolve);
@@ -89,8 +99,9 @@ export class FakeVideoPlayer {
   }
 
   /** The native side says the item is playable. */
-  becomeReady(bufferedPosition = 60): void {
+  becomeReady(bufferedPosition = 60, duration = bufferedPosition): void {
     this.bufferedPosition = bufferedPosition;
+    this.duration = duration;
     this.emitStatus("readyToPlay");
   }
 

@@ -18,8 +18,24 @@ type PlayerSubscription = ReturnType<VideoPlayer["addListener"]>;
  * frame — so the lead costs no content and a generous one is free.
  */
 const BOUNDARY_LEAD_S = 0.5;
-/** How close to the manifest boundary counts as having reached it. */
-const BOUNDARY_EPSILON_S = 0.02;
+/**
+ * How close to a segment's end counts as having reached it. It must exceed
+ * one `timeUpdate` interval: the last event before a file runs out lands
+ * wherever the 50 ms cadence happens to put it, and a stricter test simply
+ * never fires. The cost of releasing this early is at most one frame at the
+ * recorder's 15 fps; the cost of never releasing is a stalled lane, which the
+ * device showed is very much worse (see BOUNDARY_WAIT_MAX_MS).
+ */
+const BOUNDARY_EPSILON_S = 0.06;
+/**
+ * Last resort: a prepared lead-in that no event has released within this long
+ * is released anyway. Nothing should reach it — `timeUpdate`, `playToEnd` and
+ * `playingChange` all release a boundary — but a lane frozen at the end of a
+ * segment is not a failure the player core can see (the media reports itself
+ * `readyToPlay`, because it is: it is simply out of content), so it must not
+ * depend on any one of the three.
+ */
+const BOUNDARY_WAIT_MAX_MS = 400;
 /**
  * Two segments whose seam is wider than this are a CUT, not a boundary. The
  * lead-in only applies to contiguous media: playing across a real hole early
@@ -60,6 +76,8 @@ interface Activation {
   offsetSec: number;
   /** Loaded and parked at `offsetSec`, showing that frame. */
   prepared: boolean;
+  /** When `prepared` became true, for the watchdog. */
+  preparedAt: number | null;
   /**
    * The outgoing media is finished (or there was never anything to wait for,
    * as on a seek): promote as soon as `prepared`. A boundary lead-in is
@@ -179,6 +197,15 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
       player.addListener("playToEnd", () => {
         this.onPlayToEnd(idx);
       }),
+      player.addListener("playingChange", ({ isPlaying }) => {
+        // A player that stops on its own while the transport says play has
+        // run out of file. On the real segments this fires where `playToEnd`
+        // does not, and it is the signal that releases a boundary whose file
+        // ended a few milliseconds short of what the manifest claims.
+        if (!isPlaying && this.wantPlay && idx === this.activeIdx) {
+          this.releaseBoundary("the player stopped");
+        }
+      }),
     );
     return slot;
   }
@@ -246,6 +273,13 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
   }
 
   isStalled(): boolean {
+    // A prepared lead-in is NOT a stall: the next segment is loaded and one
+    // event away from being shown. Saying otherwise sends the core's stall
+    // recovery into a boundary it is about to cross anyway — and because the
+    // playhead is already inside the NEXT segment by then, that recovery
+    // jumps to the end of it and skips the whole segment. Measured on the
+    // device: 57.7 s of a 145.6 s replay silently gone.
+    if (this.activation?.prepared && !this.activation.released) return false;
     // Waiting on media that is due now: the outgoing player has run out (or a
     // seek has landed) and the incoming one is not loaded yet. Without this
     // the core cannot see a boundary the download did not make in time — the
@@ -287,17 +321,19 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
   }
 
   play(): void {
+    if (this.destroyed) return;
     this.wantPlay = true;
     this.applyTransport();
   }
 
   pause(): void {
+    if (this.destroyed) return;
     this.wantPlay = false;
     this.applyTransport();
   }
 
   setRate(rate: number): void {
-    if (this.rate === rate) return;
+    if (this.destroyed || this.rate === rate) return;
     this.rate = rate;
     for (const slot of this.slots) slot.player.playbackRate = rate;
   }
@@ -317,6 +353,15 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
     if (pending) {
       const slot = this.slots[pending.idx];
       if (!slot.ready && !slot.loading) this.load(pending.idx, pending.seg);
+      if (
+        this.wantPlay &&
+        pending.prepared &&
+        !pending.released &&
+        pending.preparedAt !== null &&
+        Date.now() - pending.preparedAt > BOUNDARY_WAIT_MAX_MS
+      ) {
+        this.releaseBoundary("watchdog");
+      }
     }
 
     const hit = segmentAt(this.timeline, ts);
@@ -379,8 +424,15 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
     return null;
   }
 
-  /** Only the player on screen ever plays; the other one is preload. */
+  /**
+   * Only the player on screen ever plays; the other one is preload.
+   *
+   * Every write below goes through JSI to a native object the hook owns, and
+   * a call on one that has been released throws `NotFoundException` rather
+   * than returning — so nothing here may run after `destroy()`.
+   */
   private applyTransport(): void {
+    if (this.destroyed) return;
     for (let i = 0; i < 2; i++) {
       const idx = i as 0 | 1;
       const slot = this.slots[idx];
@@ -402,6 +454,7 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
       seg,
       offsetSec,
       prepared: false,
+      preparedAt: null,
       // A boundary lead-in waits for the outgoing segment to finish; anything
       // else (a seek, a gap exit, the first segment of all) is due now.
       released: !seamless,
@@ -423,6 +476,7 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
 
   /** Park the incoming player on the frame it will be promoted with. */
   private prepare(): void {
+    if (this.destroyed) return;
     const pending = this.activation;
     if (!pending || pending.prepared) return;
     const slot = this.slots[pending.idx];
@@ -430,10 +484,12 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
     if (pending.offsetSec > 0.001) slot.player.currentTime = pending.offsetSec;
     slot.player.playbackRate = this.rate;
     pending.prepared = true;
+    pending.preparedAt = Date.now();
     this.maybePromote();
   }
 
   private maybePromote(): void {
+    if (this.destroyed) return;
     const pending = this.activation;
     if (!pending || !pending.prepared || !pending.released) return;
     this.activation = null;
@@ -488,6 +544,7 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
   }
 
   private markReady(idx: 0 | 1): void {
+    if (this.destroyed) return;
     const slot = this.slots[idx];
     if (!slot.seg || slot.ready) return;
     slot.ready = true;
@@ -522,15 +579,12 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
     this.lastPos = this.segPos(slot.seg) + currentTime;
     if (!this.wantPlay) return;
 
-    const remainS = slot.seg.effectiveDurationMs / 1000 - currentTime;
-    const pending = this.activation;
-    if (pending) {
-      // The outgoing segment has played out: release the lead-in, which is
-      // the moment that keeps the playhead continuous across the seam.
-      if (remainS <= BOUNDARY_EPSILON_S && sameSeg(pending.seg, this.contiguousNext(slot.seg))) {
-        pending.released = true;
-        this.maybePromote();
-      }
+    const remainS = this.endOf(slot) - currentTime;
+    if (this.activation) {
+      // The outgoing segment has played out: release the lead-in. THIS is the
+      // moment that keeps the playhead continuous across the seam — releasing
+      // at the lead instead would silently drop half a second per boundary.
+      if (remainS <= BOUNDARY_EPSILON_S) this.releaseBoundary("reached the boundary");
       return;
     }
     if (remainS > BOUNDARY_LEAD_S) return;
@@ -540,20 +594,44 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
 
   private onPlayToEnd(idx: 0 | 1): void {
     if (this.destroyed || idx !== this.activeIdx || !this.wantPlay) return;
-    const slot = this.slots[idx];
+    this.releaseBoundary("playToEnd");
+  }
+
+  /**
+   * The outgoing segment is finished, however we found out. With a lead-in
+   * already prepared this swaps; without one — the file ran out well before
+   * the manifest said it would, which `fstat`-anchored rows do — it starts
+   * the next segment now rather than leave the clock on a player that will
+   * never advance again.
+   */
+  private releaseBoundary(reason: string): void {
+    if (this.destroyed || !this.wantPlay) return;
+    const slot = this.slots[this.activeIdx];
     if (!slot.seg) return;
-    // The file ran out before the manifest boundary — `fstat`-anchored seq-0
-    // rows do this. Treat the file's end as the boundary rather than stalling
-    // the clock on a player that will never advance again.
     const next = this.contiguousNext(slot.seg);
     if (!next) return;
     const pending = this.activation;
-    if (pending && sameSeg(pending.seg, next)) {
+    if (pending) {
+      if (!sameSeg(pending.seg, next) || pending.released) return;
       pending.released = true;
       this.maybePromote();
       return;
     }
-    if (!pending) this.activate(next, 0, false);
+    void reason;
+    this.activate(next, 0, false);
+  }
+
+  /**
+   * Where this player's segment really ends, in its own seconds: the manifest
+   * duration, or the file's if the file is shorter. A file that outruns the
+   * manifest must be cut at the manifest (its tail is the next segment's wall
+   * clock); a file that falls short can only be played to its own end, and
+   * waiting for a boundary it can never reach is what freezes a lane.
+   */
+  private endOf(slot: Slot): number {
+    const manifestEnd = slot.seg ? slot.seg.effectiveDurationMs / 1000 : 0;
+    const fileEnd = slot.player.duration;
+    return fileEnd > 0 ? Math.min(manifestEnd, fileEnd) : manifestEnd;
   }
 
   private contiguousNext(seg: ReplaySegment): ReplaySegment | null {
