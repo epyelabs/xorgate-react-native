@@ -7,6 +7,7 @@
  * re-implemented.
  */
 import { act, render } from "@testing-library/react";
+import { setPlatformOS } from "./doubles/react-native.js";
 import { createElement } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ReplayManifest } from "@xorgate/react";
@@ -67,6 +68,9 @@ async function flush(): Promise<void> {
 afterEach(() => {
   resetVideoPlayers();
   captured = null;
+  // The platform is module state on the double, so a test that moved it would
+  // otherwise leak into every test after it.
+  setPlatformOS("ios");
 });
 
 describe("useReplayPlayer / ReplayVideo", () => {
@@ -85,6 +89,31 @@ describe("useReplayPlayer / ReplayVideo", () => {
     expect(views.every((v) => v.contentFit === "contain")).toBe(true);
 
     view.unmount();
+  });
+
+  /**
+   * The seam is an opacity flip between two OVERLAPPING views, and on Android
+   * `expo-video` draws into a `SurfaceView` by default — a layer the system
+   * composites rather than one the view hierarchy draws, so `opacity: 0` does
+   * not hide it and `zIndex` does not order it against its sibling. The hidden
+   * preload then parks on the next segment's first frame ON TOP of the player
+   * that is running, and the lane freezes for a whole segment while the clock
+   * carries on. A `TextureView` is an ordinary view, so alpha means what it
+   * says. iOS has no such split and must not be handed the prop.
+   */
+  it("draws into a TextureView on Android, and passes nothing on iOS", async () => {
+    setPlatformOS("android");
+    const android = render(createElement(Screen, { replay: manifest() }));
+    await flush();
+    expect(mountedVideoViews().every((v) => v.surfaceType === "textureView")).toBe(true);
+    android.unmount();
+
+    resetVideoPlayers();
+    setPlatformOS("ios");
+    const ios = render(createElement(Screen, { replay: manifest() }));
+    await flush();
+    expect(mountedVideoViews().every((v) => v.surfaceType === undefined)).toBe(true);
+    ios.unmount();
   });
 
   it("moves the front view to the player the engine promoted", async () => {

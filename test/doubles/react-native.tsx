@@ -33,6 +33,19 @@ export function appStateListenerCount(): number {
   return listeners.size;
 }
 
+/**
+ * Which platform the code under test believes it is on. Mutable, because the
+ * one place this package branches on it — `ReplayVideo`'s Android surface type
+ * — is wiring, and wiring is what this suite exists to assert. Defaults to
+ * `ios`, the acceptance platform.
+ */
+export const Platform: { OS: "ios" | "android" } = { OS: "ios" };
+
+/** Test control: run the next render as though it were on `os`. */
+export function setPlatformOS(os: "ios" | "android"): void {
+  Platform.OS = os;
+}
+
 export const StyleSheet = {
   create: <T,>(styles: T): T => styles,
   absoluteFill: { position: "absolute" as const, inset: 0 },

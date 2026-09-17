@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.2.1
+
+- **Fix: a replay lane froze for a whole segment at a time on Android.** The
+  seam is an opacity flip between two overlapping views, and `expo-video` draws
+  into a `SurfaceView` by default — a layer the system composites rather than
+  one the view hierarchy draws, so `opacity: 0` does not hide it and `zIndex`
+  does not order it against its sibling. The hidden PRELOAD therefore won: it
+  parked on the first frame of the next segment, that still frame covered the
+  player that was actually running, and the picture held for the whole segment
+  while the clock, the map and the readouts carried on. It looked like the
+  engine had stalled; the engine was never involved. `ReplayVideo` now renders
+  into a `TextureView` on Android (`surfaceType`), which is an ordinary view,
+  so alpha and z-order mean what they say. iOS is untouched — `AVPlayerLayer`
+  is a real layer and the prop is Android's alone.
+
+  Measured on an API 36 emulator against a six-segment recording, sampling the
+  lane every ~1.5 s for three minutes: **11 distinct frames out of 80 before,
+  79 out of 80 after**, over three segment boundaries either way. Each freeze
+  began within ~1.5 s of the hidden player reporting ready, and the LAST
+  segment of a replay always played correctly — by then there is nothing left
+  to preload on top of it. The engine's own trace was clean throughout, every
+  boundary a 0-131 ms seam.
+
 ## 0.2.0
 
 Replay: the recorded-media player, over `expo-video`.

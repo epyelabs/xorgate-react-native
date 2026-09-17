@@ -18,6 +18,7 @@ import type { VideoPlayer as NativeVideoPlayer } from "expo-video";
 export type VideoPlayerStatus = "idle" | "loading" | "readyToPlay" | "error";
 export type VideoSource = { uri: string } | string | number | null;
 export type VideoContentFit = "contain" | "cover" | "fill";
+export type SurfaceType = "textureView" | "surfaceView";
 
 type Listener = (payload: never) => void;
 
@@ -162,6 +163,8 @@ interface MountedView {
   opacity: number;
   nativeControls: boolean | undefined;
   contentFit: VideoContentFit | undefined;
+  /** Android's only: which native view class the picture is drawn into. */
+  surfaceType: SurfaceType | undefined;
 }
 
 const mountedViews: MountedView[] = [];
@@ -176,6 +179,7 @@ export function VideoView(props: {
   style?: unknown;
   contentFit?: VideoContentFit;
   nativeControls?: boolean;
+  surfaceType?: SurfaceType;
 }): ReactNode {
   const flat = Array.isArray(props.style)
     ? Object.assign({}, ...(props.style as object[]))
@@ -187,6 +191,7 @@ export function VideoView(props: {
     opacity,
     nativeControls: props.nativeControls,
     contentFit: props.contentFit,
+    surfaceType: props.surfaceType,
   };
   if (index === -1) mountedViews.push(record);
   else mountedViews[index] = record;

@@ -62,6 +62,7 @@ try {
   stub(
     "react-native",
     `export const AppState = { addEventListener: () => ({ remove() {} }) };
+export const Platform = { OS: "ios" };
 export const StyleSheet = { create: (s) => s, absoluteFill: {} };
 export const View = () => null;
 `,
