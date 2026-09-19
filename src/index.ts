@@ -86,6 +86,9 @@ export {
   // Errors and the backend vocabulary
   XorgateError,
   isXorgateError,
+  type AcceptedTransferOffer,
+  type BulkTransferItem,
+  type CreatedTransferOffer,
   type Device,
   type DeviceModel,
   type LatestByMetric,
@@ -103,6 +106,18 @@ export {
   type StreamKey,
   type TelemetryHistory,
   type TelemetryReading,
+  type TransferAdoption,
+  type TransferBlocker,
+  type TransferBlockerCode,
+  type TransferDeviceInput,
+  type TransferOffer,
+  type TransferOfferPreview,
+  type TransferOfferStatus,
+  type TransferPreview,
+  type TransferResult,
+  type TransferSummary,
+  type TransferTenancy,
+  type ScopeAttributeResult,
   type VideoChannel,
   type Workspace,
   type XorgateClient,
@@ -132,6 +147,19 @@ export {
   useLiveTelemetry,
   useLivePlane,
   useLiveCredentials,
+  // Live SCOPE: a device can be transferred to another workspace or
+  // organization while a viewer is open, and a vended credential is cached for
+  // up to ~50 minutes. On a phone that window is longer in practice, because a
+  // backgrounded app resumes onto the same cached credential. Neither plane
+  // fails loudly: telemetry simply stops arriving and video keeps flowing until
+  // the next reconnect. `useDeviceScope` is how that becomes a typed error.
+  useLiveScope,
+  useDeviceScope,
+  type UseLiveScope,
+  type UseDeviceScope,
+  type UseDeviceScopeOptions,
+  type DeviceScopeStatus,
+  type LiveScope,
   parseTelemetryPayload,
   presignIotWssUrl,
   type UseLiveTelemetry,

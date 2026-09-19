@@ -213,6 +213,27 @@ Unchanged from the web package — `mqtt.js` 5 runs on React Native's global
 const { latest, history, status, receivedAt } = useLiveTelemetry(deviceId)
 ```
 
+### Live scope
+
+A device can be transferred to another workspace or organization while a screen
+is open. The vended live credential encodes the old tenancy and is cached for up
+to ~50 minutes, and **nothing fails**: telemetry simply stops arriving and video
+keeps flowing until the next reconnect. On a phone that window is effectively
+longer, because a backgrounded app resumes onto the same cached credential and
+`appStateWake` nudges the live planes straight back onto the stale scope.
+
+```tsx
+const scope = useDeviceScope(deviceId)
+const live = useLiveTelemetry(scope.outOfScope ? null : deviceId)
+
+if (scope.error) return <Text>{scope.error.message}</Text>   // DEVICE_OUT_OF_SCOPE
+```
+
+`useDeviceScope` re-vends once before complaining, since the ordinary cause is
+just a stale cached credential. If your app moves devices itself, call
+`useLiveScope().invalidate()` afterwards and every open live consumer
+re-resolves immediately.
+
 Read freshness off `receivedAt`, not `status`. A phone that loses signal keeps
 a socket that reads `connected` until the OS surfaces the close, which can take
 20 s or more; the age of the last frame is the honest signal, and the web app

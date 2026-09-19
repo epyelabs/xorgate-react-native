@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.3.0
+
+Tracks `@xorgate/react` 0.3.0 (live scope) and `@xorgate/sdk` 0.7.0 (device
+transfer). No native change: the same `dist`, plus re-exports.
+
+### Added
+
+- **`useLiveScope()` and `useDeviceScope(deviceId)`**, re-exported unchanged
+  from `@xorgate/react`. A device can be transferred to another workspace or
+  organization while a viewer is open; the vended live credential is cached for
+  up to ~50 minutes, and neither plane fails loudly when it goes stale —
+  telemetry simply stops arriving and video keeps flowing until the next
+  reconnect. `useDeviceScope` turns that into a typed `DEVICE_OUT_OF_SCOPE`,
+  re-vending once first. `useLiveScope().invalidate()` makes every open live
+  consumer re-resolve after you transfer a device yourself.
+
+  **This matters more on a phone than on the web.** A backgrounded app resumes
+  onto the same cached credential, and `appStateWake` nudges the live planes
+  back up — straight onto the stale scope. The scope guard is what makes the
+  resume honest.
+
+- The transfer vocabulary from `@xorgate/sdk` (`TransferSummary`,
+  `TransferPreview`, `TransferOffer`, `TransferOfferPreview`,
+  `TransferAdoption`, `ScopeAttributeResult` and the rest), so a screen and a
+  server route pass the same objects around.
+
+### Unchanged, and checked
+
+- **Replay carries no tenancy assumption.** Segment playback runs on presigned
+  URLs minted per manifest and refreshed from `manifest.urlExpiresAt`; nothing
+  in `replay-engine.ts` caches an organization or workspace id, so a transfer
+  cannot strand a replay. (Replay does become unreadable to the OLD owner once
+  the device moves — media is device-keyed and travels with it — but that shows
+  up as a plain 404 from the manifest route, not as a stale URL.)
+
 ## 0.2.1
 
 - **Fix: a replay lane froze for a whole segment at a time on Android.** The
