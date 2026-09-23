@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.4.0
+
+Tracks `@xorgate/react` 0.4.0: recorded telemetry read straight from S3
+when the replay manifest carries its `telemetry` block. No native change:
+the same `dist`, plus re-exports.
+
+### Added
+
+- **`useReplayTelemetry` artifact mode**, re-exported unchanged from
+  `@xorgate/react`. When `useReplayManifest` (or your own manifest fetch)
+  returns a manifest with a `telemetry` block, the hook reads one presigned
+  overview object per telemetry session for the route line and the scrub
+  preview, and the device's own 60 s segments for the readouts around the
+  playhead: no `/telemetry` call through your relay, no Lambda, no database.
+  Without the block, the REST path works as before, with its
+  `Promise.all` bug fixed (one throttled group no longer wipes the route).
+  `useReplayTelemetry().source` says which path served the replay.
+- **`useReplayManifest` polls every 60 s while a session is open**, so a
+  replay opened mid-drive grows on a phone the same way it does on the web.
+  `player.telemetry` (the block, from the latest manifest) and
+  `player.notifyUrlsExpired()` (the 403 seam) are on the native
+  `useReplayPlayer` too, because it spreads the core.
+- The artifact helpers and types (`overviewToSeries`, `segmentToSeries`,
+  `insightsFromOverview`, `mergeSeries`, `buildOverviewSeries`,
+  `chooseBucketMs`, `segmentsCovering`, `artifactKey`,
+  `manifestHasOpenSession`, `REPLAY_OPEN_POLL_MS`, `OverviewV1`,
+  `ReplayTelemetrySource`, ...) and the `ReplayTelemetry*`,
+  `TelemetryInsights`, `TelemetryInsightEvent` and `TelemetrySession` types.
+
+### Verified on hardware
+
+- **No inflater, on purpose.** Every artifact URL the manifest hands out is
+  served with `Content-Encoding: gzip`; React Native has no
+  `DecompressionStream` and this package adds no dependency for it. A plain
+  `fetch()` of a normalised segment returns the JSONL text and of an overview
+  returns the JSON, inflated by the platform's own networking stack, on both
+  an iOS simulator and an Android emulator (the check and its numbers are
+  recorded in the telemetry-session-artifacts plan's PROGRESS.md).
+
 ## 0.3.0
 
 Tracks `@xorgate/react` 0.3.0 (live scope) and `@xorgate/sdk` 0.7.0 (device

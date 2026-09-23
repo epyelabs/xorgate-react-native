@@ -38,10 +38,15 @@ try {
     path.join(work, "package.json"),
     JSON.stringify({ name: "consumer", private: true, type: "module" }),
   );
-  execFileSync("npm", ["install", "--no-audit", "--no-fund", tarPath, "react"], {
-    cwd: work,
-    stdio: "pipe",
-  });
+  // Before a matching @xorgate/react is on npm, XORGATE_REACT_TARBALL points
+  // at its packed tarball so the consumer install resolves the dependency
+  // locally (the two packages release together).
+  const reactTarball = process.env.XORGATE_REACT_TARBALL;
+  execFileSync(
+    "npm",
+    ["install", "--no-audit", "--no-fund", tarPath, "react", ...(reactTarball ? [reactTarball] : [])],
+    { cwd: work, stdio: "pipe" },
+  );
 
   // React Native and react-native-webrtc are peers with no Node build, so the
   // probe supplies the smallest thing that satisfies the imports. This is not
