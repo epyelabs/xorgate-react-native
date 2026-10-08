@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.5.0
+
+A replay's first frame on iOS in about a second, not about ten.
+
+### Added
+
+- **`@xorgate/react-native/segment-cache`**: `createSegmentCache()`, and the
+  `segmentCache` option on `useReplayPlayer` (and `ExpoVideoReplayEngine`). With
+  it, each finished segment is brought to disk with one plain download and the
+  native player opens the local file. `AVPlayer` does not play a recorded fMP4
+  progressively — with no `sidx` it reads the whole file before its first frame,
+  and pulls it from S3 through several sequential range requests, abandoning two
+  of them — so this is where the time goes. On the same 7.3 MB segment and
+  network, the first frame in the iOS Simulator went from 9.7 / 10.9 / 11.9 /
+  2.9 s streamed to 1.1 / 1.4 / 1.1 / 1.9 s cached. Pass it on iOS only:
+  Android's ExoPlayer starts after a few seconds of buffer and was ready in
+  ~1.4 s streaming.
+  - **Opt-in, on its own entry point**, the only module that imports
+    `expo-file-system` (a new OPTIONAL peer, `>=57.0.0`). Without a
+    `segmentCache`, nothing changes and nothing new is bundled.
+  - The app's own cache folder (`Library/Caches` on iOS): no permission, usage
+    string or entitlement; out of iCloud backup and purgeable by the OS.
+  - Whole files only (`.part`, renamed when complete and size-checked against
+    the manifest); one download per object, shared by both players; a file a
+    player holds is never evicted; at most four finished segments otherwise;
+    emptied when created and by `clear()`.
+  - A segment still being recorded streams. A 403 refreshes the manifest and a
+    404/410 is a media error, as when streaming; any other download failure
+    falls back to streaming that segment.
+- `ReplaySegmentCache`, `SegmentFetchError` and `segmentCacheKey`, exported from
+  the main entry for a custom cache.
+
+### Fixed
+
+- While a slot's segment is downloading, status events from the player's
+  PREVIOUS item are ignored. Streaming made that window a few milliseconds; a
+  download makes it seconds, long enough for a stray `readyToPlay` to promote
+  the old picture as the new segment.
+
 ## 0.4.0
 
 Tracks `@xorgate/react` 0.4.0: recorded telemetry read straight from S3

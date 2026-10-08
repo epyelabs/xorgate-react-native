@@ -8,6 +8,7 @@ import {
 } from "@xorgate/react";
 import { createVideoPlayer, type VideoPlayer } from "expo-video";
 import { ExpoVideoReplayEngine } from "./replay-engine.js";
+import type { ReplaySegmentCache } from "./segment-cache.js";
 
 export type {
   ReplayLaneState,
@@ -53,6 +54,14 @@ export interface UseReplayPlayerNativeOptions extends UseReplayPlayerOptions {
    * you find out why a boundary did or did not happen.
    */
   debug?: (message: string) => void;
+  /**
+   * Keep each finished segment on disk and play it from there. `AVPlayer`
+   * reads a recorded fMP4 to its end before its first frame and pulls it from
+   * S3 badly; one plain download is several times faster. Create it with
+   * `createSegmentCache()` from `@xorgate/react-native/segment-cache` and pass
+   * it on iOS. Read once, when a lane's engine is built.
+   */
+  segmentCache?: ReplaySegmentCache;
 }
 
 /**
@@ -75,7 +84,7 @@ export function useReplayPlayer(
   manifest: ReplayManifest | null | undefined,
   options: UseReplayPlayerNativeOptions = {},
 ): UseReplayPlayer {
-  const { createPlayer, debug, ...coreOptions } = options;
+  const { createPlayer, debug, segmentCache, ...coreOptions } = options;
   const core = useReplayPlayerCore(manifest, coreOptions);
   const { lanes, attachLane } = core;
 
@@ -83,6 +92,8 @@ export function useReplayPlayer(
   createPlayerRef.current = createPlayer;
   const debugRef = useRef(debug);
   debugRef.current = debug;
+  const segmentCacheRef = useRef(segmentCache);
+  segmentCacheRef.current = segmentCache;
 
   const pool = useRef(new Map<string, readonly [VideoPlayer, VideoPlayer]>());
   const engines = useRef(new Map<string, ExpoVideoReplayEngine>());
@@ -119,6 +130,7 @@ export function useReplayPlayer(
           ...engineOptions,
           players: pair,
           onActivePlayerChange: () => bumpActive((v) => v + 1),
+          ...(segmentCacheRef.current ? { segmentCache: segmentCacheRef.current } : {}),
           ...(debugRef.current
             ? { onDebug: (message: string) => debugRef.current?.(`${streamKey}: ${message}`) }
             : {}),

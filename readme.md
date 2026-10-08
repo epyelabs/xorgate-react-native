@@ -26,7 +26,8 @@ npx expo install @xorgate/react-native react-native-webrtc @config-plugins/react
 ```
 
 Peers: `react`, `react-native`, `react-native-webrtc`, `expo-crypto`,
-`expo-video`.
+`expo-video`, and optionally `expo-file-system` (only for the iOS replay
+segment cache, below).
 `@xorgate/react` is a dependency, not a peer — one resolved copy is what makes
 `instanceof XorgateError` hold across the boundary.
 
@@ -320,6 +321,47 @@ outgoing picture is held throughout rather than going black, and
 `player.laneState(streamKey)` plus `player.clock` are what a scrubber should
 read. If you build a scrub thumb, seek as the thumb MOVES, not only on release:
 the intermediate seeks warm the player the release will land on.
+
+#### On iOS, pass a segment cache
+
+```ts
+import { createSegmentCache } from "@xorgate/react-native/segment-cache"
+
+// ONE per app: the folder is emptied when it is created.
+const segmentCache = Platform.OS === "ios" ? createSegmentCache() : undefined
+
+const player = useReplayPlayer(manifest, { segmentCache })
+// and on sign-out: segmentCache?.clear()
+```
+
+`AVPlayer` does not play a recorded segment progressively. The fMP4 has no
+`sidx`, so AVFoundation reads the whole file before its first frame, and it
+pulls it from S3 through several sequential range requests, abandoning two
+of them. With a cache, each finished segment arrives as one plain download
+and the player opens the local file instead. Measured on the same 7.3 MB
+segment, first frame: a median of ~10 s streamed against ~1.25 s through the
+cache in the app, and 1.7-32 s (median ~13 s) against 1.0-1.75 s in isolation.
+Android's ExoPlayer starts after a few seconds of buffer and does not need it.
+
+- **Opt-in, on its own entry point.** `@xorgate/react-native/segment-cache` is
+  the only module that imports `expo-file-system` (an optional peer: `npx expo
+  install expo-file-system`); without a `segmentCache`, every segment streams
+  exactly as before.
+- **The app's own cache folder** (`Library/Caches`): no permission, no usage
+  string, no entitlement. iOS leaves it out of iCloud backup and may purge it
+  under storage pressure, which is what Apple's data storage guidelines ask of
+  re-downloadable content.
+- **Whole files only.** A download lands in a `.part` file and is renamed once
+  it is complete and, when the manifest knows the size, only if it matches.
+- **A segment still being recorded streams**: its file is still growing.
+- **Failures degrade, never strand.** A 403 refreshes the manifest and a
+  404/410 is a media error, as when streaming; anything else (the network,
+  the disk) falls back to streaming that segment.
+- **Bounded and short-lived.** At most four finished segments are kept
+  (about 30 MB at 720p; `maxEntries` to change it), least recently used
+  evicted first. A file a player is reading is never evicted, so the folder
+  can briefly hold more. It is emptied when the cache is created (once per
+  launch) and by `clear()`.
 
 ### Waking the live plane
 

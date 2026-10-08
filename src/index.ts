@@ -60,6 +60,11 @@ export {
   type UseReplayPlayerOptions,
 } from "./use-replay-player.js";
 export { ReplayVideo, type ReplayVideoProps } from "./replay-video.js";
+export {
+  SegmentFetchError,
+  segmentCacheKey,
+  type ReplaySegmentCache,
+} from "./segment-cache.js";
 
 // ---------------------------------------------------------------------------
 // Re-exported unchanged from `@xorgate/react`

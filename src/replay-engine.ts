@@ -8,6 +8,7 @@ import {
   type ReplayTimeline,
 } from "@xorgate/react";
 import type { VideoPlayer, VideoPlayerStatus } from "expo-video";
+import { SegmentFetchError, segmentCacheKey, type ReplaySegmentCache } from "./segment-cache.js";
 
 /** `expo-video` returns these from `addListener`; inferred so this file needs no import from expo-modules-core. */
 type PlayerSubscription = ReturnType<VideoPlayer["addListener"]>;
@@ -84,6 +85,10 @@ interface Slot {
   /** Bumped on every load so a stale promise resolution is ignored. */
   gen: number;
   subs: PlayerSubscription[];
+  /** The cached file this player holds, handed back when it loads another. */
+  cacheKey: string | null;
+  /** The segment download this slot is waiting on, if any. */
+  download: AbortController | null;
 }
 
 /** The hidden player being brought to the front, and how far along that is. */
@@ -122,6 +127,13 @@ export interface ExpoVideoReplayEngineOptions extends ReplayEngineOptions {
    * so at the time.
    */
   onDebug?: (message: string) => void;
+  /**
+   * Bring each finished segment to disk and hand the player the local file
+   * (see {@link ReplaySegmentCache} for why iOS wants this). Unset, every
+   * segment streams from its presigned URL, exactly as before. A segment still
+   * being recorded always streams: its file is still growing.
+   */
+  segmentCache?: ReplaySegmentCache;
 }
 
 /**
@@ -169,6 +181,7 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
   private readonly onAuthError: (() => void) | undefined;
   private readonly onActivePlayerChange: (() => void) | undefined;
   private readonly onDebug: ((message: string) => void) | undefined;
+  private readonly segmentCache: ReplaySegmentCache | undefined;
 
   private readonly slots: readonly [Slot, Slot];
   private activeIdx: 0 | 1 = 0;
@@ -201,6 +214,7 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
     this.onAuthError = opts.onAuthError;
     this.onActivePlayerChange = opts.onActivePlayerChange;
     this.onDebug = opts.onDebug;
+    this.segmentCache = opts.segmentCache;
     this.slots = [
       this.makeSlot(opts.players[0], 0),
       this.makeSlot(opts.players[1], 1),
@@ -231,6 +245,8 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
       loadedAt: null,
       gen: 0,
       subs: [],
+      cacheKey: null,
+      download: null,
     };
     slot.subs.push(
       player.addListener("timeUpdate", ({ currentTime }) => {
@@ -462,6 +478,10 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
       for (const sub of slot.subs) sub.remove();
       slot.subs = [];
       slot.gen++;
+      slot.download?.abort();
+      slot.download = null;
+      if (slot.cacheKey !== null) this.segmentCache?.release(slot.cacheKey);
+      slot.cacheKey = null;
       slot.seg = null;
       slot.ready = false;
       slot.loading = false;
@@ -717,7 +737,74 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
     slot.ready = false;
     slot.loading = true;
     slot.loadedAt = null;
-    void slot.player.replaceAsync({ uri: this.getUrl(seg) }).then(
+    slot.download?.abort();
+    slot.download = null;
+
+    const url = this.getUrl(seg);
+    const cache = this.segmentCache;
+    // A segment still being recorded streams: its file is still growing, and
+    // a copy taken now would be a stale, shorter one.
+    if (!cache || !seg.finalized) {
+      this.setSource(slot, gen, seg, url, null);
+      return;
+    }
+
+    const key = segmentCacheKey(url);
+    const controller = new AbortController();
+    slot.download = controller;
+    const startedAt = Date.now();
+    cache.acquire(key, url, seg.sizeBytes ?? null, controller.signal).then(
+      (uri) => {
+        if (this.destroyed || slot.gen !== gen) {
+          cache.release(key);
+          return;
+        }
+        slot.download = null;
+        this.debug(`on disk seq ${seg.seq} in ${Date.now() - startedAt} ms`);
+        this.setSource(slot, gen, seg, uri, key);
+      },
+      (err: unknown) => {
+        if (this.destroyed || slot.gen !== gen) return;
+        slot.download = null;
+        const status = err instanceof SegmentFetchError ? err.status : null;
+        if (status === 403) {
+          // The signature lapsed: refresh the manifest, and retry through the
+          // backoff with the new URL — exactly what a streamed 403 does.
+          slot.loading = false;
+          this.failedAt.set(seg.startTs, Date.now());
+          this.onAuthError?.();
+          return;
+        }
+        if (status === 404 || status === 410) {
+          slot.loading = false;
+          this.failedAt.set(seg.startTs, Date.now());
+          this.onError(`Recorded video segment ${seg.seq} is no longer available.`);
+          return;
+        }
+        // The network, the disk, a short file: play it the way it played
+        // before there was a cache, rather than not at all.
+        this.debug(
+          `download of seq ${seg.seq} failed (${err instanceof Error ? err.message : String(err)}); streaming it`,
+        );
+        this.setSource(slot, gen, seg, url, null);
+      },
+    );
+  }
+
+  /**
+   * Hand `uri` to the slot's player. `key` is the cached file it now holds;
+   * the one it held before goes back to the cache, which may then evict it.
+   */
+  private setSource(
+    slot: Slot,
+    gen: number,
+    seg: ReplaySegment,
+    uri: string,
+    key: string | null,
+  ): void {
+    const previous = slot.cacheKey;
+    slot.cacheKey = key;
+    void slot.player.replaceAsync({ uri }).then(
       () => {
         if (this.destroyed || slot.gen !== gen) return;
         slot.loadedAt = Date.now();
@@ -731,6 +818,7 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
         this.onLoadFailure(seg, err);
       },
     );
+    if (previous !== null) this.segmentCache?.release(previous);
   }
 
   /**
@@ -877,6 +965,10 @@ export class ExpoVideoReplayEngine implements ReplayEngine {
   ): void {
     if (this.destroyed) return;
     const slot = this.slots[idx];
+    // Still downloading this slot's segment: the player holds the PREVIOUS
+    // item, and anything it reports is about that one. Trusting a
+    // `readyToPlay` here would promote the old picture as the new segment.
+    if (slot.download !== null) return;
     if (status === "readyToPlay") {
       if (!slot.ready) this.markReady(idx);
       else if (idx === this.activeIdx) this.onUpdate();

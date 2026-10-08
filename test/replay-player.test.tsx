@@ -110,6 +110,34 @@ describe("useReplayPlayer / ReplayVideo", () => {
     view.unmount();
   });
 
+  it("routes finished segments through a segment cache when one is given", async () => {
+    const acquired: string[] = [];
+    const segmentCache = {
+      acquire: (key: string) => {
+        acquired.push(key);
+        return Promise.resolve(`file:///cache/${acquired.length}.mp4`);
+      },
+      release: () => undefined,
+    };
+    function CachedScreen({ replay }: { replay: ReplayManifest }) {
+      const player = useReplayPlayer(replay, {
+        createPlayer: () => asNative(createVideoPlayer(null)),
+        segmentCache,
+      });
+      return createElement(ReplayVideo, { player, streamKey: "cam0" });
+    }
+    const view = render(createElement(CachedScreen, { replay: manifest() }));
+    await flush();
+
+    expect(acquired).toEqual(["https://s3.example/cam0-0.mp4"]);
+    const loads = createdPlayers.flatMap((p: FakeVideoPlayer) => p.loads);
+    expect(loads.map((source) => (source as { uri: string } | null)?.uri ?? null)).toEqual([
+      "file:///cache/1.mp4",
+    ]);
+
+    view.unmount();
+  });
+
   /**
    * The seam is an opacity flip between two OVERLAPPING views, and on Android
    * `expo-video` draws into a `SurfaceView` by default — a layer the system

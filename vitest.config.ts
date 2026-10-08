@@ -26,6 +26,10 @@ export default defineConfig({
       { find: /^react-native$/, replacement: path.join(here, "test/doubles/react-native.tsx") },
       { find: /^expo-crypto$/, replacement: path.join(here, "test/doubles/expo-crypto.ts") },
       { find: /^expo-video$/, replacement: path.join(here, "test/doubles/expo-video.tsx") },
+      {
+        find: /^expo-file-system$/,
+        replacement: path.join(here, "test/doubles/expo-file-system.ts"),
+      },
     ],
   },
   test: {

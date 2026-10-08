@@ -3,7 +3,7 @@
 // it the way a consumer would. Mirrors @xorgate/react's script; the consumer
 // probe grows with the surface (N2: the provider and hooks; N3: replay).
 import { execFileSync, execSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -171,6 +171,24 @@ console.log("consumer import ok");
   if (!polyfillTypes) fail("the ./polyfills subpath is missing from the published exports map");
   for (const f of ["dist/polyfills.js", "dist/polyfills.d.ts"]) {
     if (!lower.includes(f)) fail(`missing from tarball: ${f}`);
+  }
+
+  // The segment cache is the ONLY module that imports expo-file-system, and
+  // only through its own subpath: an app that never opts in must never bundle
+  // it. Not imported here either — expo-file-system has no Node build.
+  const pkgExports = JSON.parse(
+    readFileSync(path.join(work, "node_modules/@xorgate/react-native/package.json"), "utf8"),
+  ).exports;
+  if (!pkgExports["./segment-cache"]) fail("the ./segment-cache subpath is missing from the published exports map");
+  for (const f of ["dist/expo-segment-cache.js", "dist/expo-segment-cache.d.ts"]) {
+    if (!lower.includes(f)) fail(`missing from tarball: ${f}`);
+  }
+  const distDir = path.join(work, "node_modules/@xorgate/react-native/dist");
+  for (const f of readdirSync(distDir).filter((name) => name.endsWith(".js"))) {
+    if (f === "expo-segment-cache.js") continue;
+    if (readFileSync(path.join(distDir, f), "utf8").includes("expo-file-system")) {
+      fail(`dist/${f} imports expo-file-system outside the ./segment-cache entry`);
+    }
   }
 
   // No secret material in the tarball (the local .env, if any, is gitignored
