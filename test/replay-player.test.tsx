@@ -92,6 +92,25 @@ describe("useReplayPlayer / ReplayVideo", () => {
   });
 
   /**
+   * A native player does not stop downloading when its load is cancelled, so
+   * a lane started and torn down inside one mount costs a whole segment: on
+   * a 12 Mbps link that was 13.6 MB on the wire for a 7.3 MB segment, and the
+   * first frame 9.7 s out instead of 6.1 s. Needs `@xorgate/react` >= 0.4.2,
+   * whose core stopped replacing a lane's registration under its detach.
+   */
+  it("loads the first segment once on mount, and nothing is torn down to do it", async () => {
+    const view = render(createElement(Screen, { replay: manifest() }));
+    await flush();
+
+    const loads = createdPlayers.flatMap((p: FakeVideoPlayer) => p.loads);
+    expect(loads.map((source) => (source === null ? null : (source as { uri: string }).uri))).toEqual([
+      "https://s3.example/cam0-0.mp4",
+    ]);
+
+    view.unmount();
+  });
+
+  /**
    * The seam is an opacity flip between two OVERLAPPING views, and on Android
    * `expo-video` draws into a `SurfaceView` by default — a layer the system
    * composites rather than one the view hierarchy draws, so `opacity: 0` does
